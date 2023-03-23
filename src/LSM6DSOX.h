@@ -21,6 +21,23 @@
 #include <Wire.h>
 #include <SPI.h>
 
+#include <vector>
+#include <utility> // For pair
+
+enum PowerModeXL {
+  XL_POWER_UNDEFINED,
+  XL_POWER_DOWN,
+  XL_POWER_MODE_ULP,
+  XL_POWER_MODE_LP_NORMAL,
+  XL_POWER_MODE_HP
+};
+enum PowerModeG {
+  G_POWER_UNDEFINED,
+  G_POWER_DOWN,
+  G_POWER_MODE_LP_NORMAL,
+  G_POWER_MODE_HP
+};
+
 class LSM6DSOXClass {
   public:
     LSM6DSOXClass(TwoWire& wire, uint8_t slaveAddress);
@@ -29,6 +46,13 @@ class LSM6DSOXClass {
 
     int begin();
     void end();
+
+    // Configuration
+    int setPowerModeXL(PowerModeXL power_XL);
+    int setPowerModeG(PowerModeG power_G);
+
+    int setODR_XL(float odr);
+    int setODR_G(float odr);
 
     // Accelerometer
     int readAcceleration(float& x, float& y, float& z); // Results are in g (earth gravity).
@@ -49,7 +73,10 @@ class LSM6DSOXClass {
     int readRegister(uint8_t address);
     int readRegisters(uint8_t address, uint8_t* data, size_t length);
     int writeRegister(uint8_t address, uint8_t value);
+    int readModifyWriteRegister(uint8_t address, uint8_t value, uint8_t mask);
 
+    uint8_t nearestODRbits(float odr);
+    float getODRFromBits(uint8_t odr_bits);
 
   private:
     TwoWire* _wire;

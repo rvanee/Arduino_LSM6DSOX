@@ -19,17 +19,21 @@
 
 #include "LSM6DSOX.h"
 
+#include <algorithm>  // lower_bound
+#include <math.h>     // NAN
+
 #define LSM6DSOX_ADDRESS            0x6A
 
 #define LSM6DSOX_WHO_AM_I_REG       0X0F
 #define LSM6DSOX_CTRL1_XL           0X10
 #define LSM6DSOX_CTRL2_G            0X11
 
-#define LSM6DSOX_STATUS_REG         0X1E
-
+#define LSM6DSOX_CTRL5_C            0X14
 #define LSM6DSOX_CTRL6_C            0X15
 #define LSM6DSOX_CTRL7_G            0X16
 #define LSM6DSOX_CTRL8_XL           0X17
+
+#define LSM6DSOX_STATUS_REG         0X1E
 
 #define LSM6DSOX_OUT_TEMP_L         0X20
 #define LSM6DSOX_OUT_TEMP_H         0X21
@@ -47,6 +51,14 @@
 #define LSM6DSOX_OUTY_H_XL          0X2B
 #define LSM6DSOX_OUTZ_L_XL          0X2C
 #define LSM6DSOX_OUTZ_H_XL          0X2D
+
+
+// Bit masks
+#define MASK_ODR_XL                 0xF0  // CTRL1_XL
+#define MASK_ODR_G                  0xF0  // CTRL2_G
+#define MASK_XL_ULP_EN              0x80  // CTRL5_C
+#define MASK_XL_HM_MODE             0x10  // CTRL6_C
+#define MASK_G_HM_MODE              0x10  // CTRL7_G
 
 
 LSM6DSOXClass::LSM6DSOXClass(TwoWire& wire, uint8_t slaveAddress) :
@@ -78,8 +90,8 @@ int LSM6DSOXClass::begin()
   } else {
     _wire->begin();
   }
-
-  if (!(readRegister(LSM6DSOX_WHO_AM_I_REG) == 0x6C || readRegister(LSM6DSOX_WHO_AM_I_REG) == 0x69)) {
+  // See datasheet: WHO AM I is fixed at 0x6C
+  if (readRegister(LSM6DSOX_WHO_AM_I_REG) != 0x6C) {
     end();
     return 0;
   }
@@ -113,6 +125,106 @@ void LSM6DSOXClass::end()
   }
 }
 
+int LSM6DSOXClass::setPowerModeXL(PowerModeXL power_XL)
+{
+  int result = 0;
+  uint8_t odr_G;
+  switch(power_XL) {
+    case XL_POWER_DOWN:
+      result = readModifyWriteRegister(LSM6DSOX_CTRL1_XL, 0x00, MASK_ODR_XL);
+      if(result < 1) { return result; }
+      break;
+
+    case XL_POWER_MODE_ULP:
+      // Check if gyroscope in power-down mode (see datasheet par 6.2.1)
+      result = readRegister(LSM6DSOX_CTRL2_G);
+      if(result < 1) { return result; }
+      odr_G = result & MASK_ODR_G;
+      if(odr_G != 0b0000) { return -2; }
+      // First power down (see datasheet par 6.2.1)
+      result = readModifyWriteRegister(LSM6DSOX_CTRL1_XL, 0x00, MASK_ODR_XL);
+      if(result < 1) { return result; }
+      // Set XL_HM_MODE to 0 (see datasheet par 6.2.1)
+      result = readModifyWriteRegister(LSM6DSOX_CTRL6_C, 0x00, MASK_XL_HM_MODE);
+      if(result < 1) { return result; }
+      // Now set XL_ULP_EN to 1
+      result = readModifyWriteRegister(LSM6DSOX_CTRL5_C, 0x80, MASK_XL_ULP_EN);
+      if(result < 1) { return result; }
+      break;
+
+    case XL_POWER_MODE_LP_NORMAL:
+      // Set XL_ULP_EN to 0
+      result = readModifyWriteRegister(LSM6DSOX_CTRL5_C, 0x00, MASK_XL_ULP_EN);
+      if(result < 1) { return result; }
+      // Set XL_HM_MODE to 1
+      result = readModifyWriteRegister(LSM6DSOX_CTRL6_C, 0x10, MASK_XL_HM_MODE);
+      if(result < 1) { return result; }
+      break;
+
+    case XL_POWER_MODE_HP:
+      // Set XL_ULP_EN to 0
+      result = readModifyWriteRegister(LSM6DSOX_CTRL5_C, 0x00, MASK_XL_ULP_EN);
+      if(result < 1) { return result; }
+      // Set XL_HM_MODE to 0
+      result = readModifyWriteRegister(LSM6DSOX_CTRL6_C, 0x00, MASK_XL_HM_MODE);
+      if(result < 1) { return result; }
+
+    default:
+      // Do nothing
+      break;
+  }
+  return result;
+}
+
+int LSM6DSOXClass::setPowerModeG(PowerModeG power_G)
+{
+  int result = 0;
+
+  switch(power_G) {
+    case G_POWER_DOWN:
+      result = readModifyWriteRegister(LSM6DSOX_CTRL2_G, 0x00, MASK_ODR_G);
+      if(result < 1) { return result; }
+      break;
+
+    case G_POWER_MODE_LP_NORMAL:
+      // Set G_HM_MODE to 1
+      result = readModifyWriteRegister(LSM6DSOX_CTRL7_G, 0x10, MASK_G_HM_MODE);
+      if(result < 1) { return result; }
+      break;
+
+    case G_POWER_MODE_HP:
+      // Set G_HM_MODE to 0
+      result = readModifyWriteRegister(LSM6DSOX_CTRL7_G, 0x00, MASK_G_HM_MODE);
+      if(result < 1) { return result; }
+      break;
+
+    default:
+      // Do nothing
+      break;
+  }
+  return result;
+}
+
+int LSM6DSOXClass::setODR_XL(float odr) 
+{ 
+  // Look up ordinary ODR bit values
+  uint8_t odr_bits = nearestODRbits(odr);
+  // Handle special case of 1.6Hz, which is unique to XL. It needs to be selected
+  // if 0 < odr < (halfway 1.6 and 12.5)
+  // NOTE that in High Performance mode 12.5Hz will be automatically selected
+  // in this case
+  if((odr > 0.0) && (odr < (12.5 - 1.6)/2)) {
+      odr_bits = 0b1011;
+  } 
+  return readModifyWriteRegister(LSM6DSOX_CTRL1_XL, odr_bits << 4, MASK_ODR_XL);
+}
+
+int LSM6DSOXClass::setODR_G(float odr) 
+{
+  uint8_t odr_bits = nearestODRbits(odr);
+  return readModifyWriteRegister(LSM6DSOX_CTRL2_G, odr_bits << 4, MASK_ODR_G);
+}
+
 int LSM6DSOXClass::readAcceleration(float& x, float& y, float& z)
 {
   int16_t data[3];
@@ -143,7 +255,19 @@ int LSM6DSOXClass::accelerationAvailable()
 
 float LSM6DSOXClass::accelerationSampleRate()
 {
-  return 104.0F;
+  int result = readRegister(LSM6DSOX_CTRL1_XL);
+  if(result >= 0) {
+    uint8_t odr_bits = ((uint8_t)result) >> 4;
+    // Handle special case of 1.6/12.5Hz
+    if(odr_bits == 0b1011) {
+      // 1.6Hz in Low Power mode, 12.5Hz otherwise
+      int ctrl6_c = readRegister(LSM6DSOX_CTRL6_C);
+      if(ctrl6_c < 1) { return NAN; }
+      return (ctrl6_c & MASK_XL_HM_MODE) ? 1.6 : 12.5;
+    }
+    return getODRFromBits(odr_bits);
+  }
+  return NAN;
 }
 
 int LSM6DSOXClass::readGyroscope(float& x, float& y, float& z)
@@ -213,7 +337,12 @@ int LSM6DSOXClass::temperatureAvailable()
 
 float LSM6DSOXClass::gyroscopeSampleRate()
 {
-  return 104.0F;
+  int result = readRegister(LSM6DSOX_CTRL2_G);
+  if(result >= 0) {
+    uint8_t odr_bits = ((uint8_t)result) >> 4;
+    return getODRFromBits(odr_bits);
+  }
+  return NAN;
 }
 
 int LSM6DSOXClass::readRegister(uint8_t address)
@@ -223,7 +352,6 @@ int LSM6DSOXClass::readRegister(uint8_t address)
   if (readRegisters(address, &value, sizeof(value)) != 1) {
     return -1;
   }
-  
   return value;
 }
 
@@ -239,7 +367,7 @@ int LSM6DSOXClass::readRegisters(uint8_t address, uint8_t* data, size_t length)
   } else {
     _wire->beginTransmission(_slaveAddress);
     _wire->write(address);
-
+    // Do not send a stop message: see data sheet par 5.1.2
     if (_wire->endTransmission(false) != 0) {
       return -1;
     }
@@ -273,6 +401,60 @@ int LSM6DSOXClass::writeRegister(uint8_t address, uint8_t value)
     }
   }
   return 1;
+}
+
+int LSM6DSOXClass::readModifyWriteRegister(uint8_t address, uint8_t value, uint8_t mask)
+{
+  int result = readRegister(address);
+  if(result >= 0) {
+    uint8_t current_value = result;
+    return writeRegister(address, (current_value & ~mask) | value);
+  }
+  return result;
+}
+
+/* 
+  ODR frequency <-> configuration bits conversion
+*/
+
+const std::vector<std::pair<float, uint8_t>> ODR_freq_bits = {
+  { 0,    0b0000 }, // means power-down
+  { 12.5, 0b0001 },
+  { 26,   0b0010 },
+  { 52,   0b0011 },
+  { 104,  0b0100 },
+  { 208,  0b0101 },
+  { 416,  0b0110 },
+  { 833,  0b0111 },
+  { 1667, 0b1000 },
+  { 3333, 0b1001 },
+  { 6667, 0b1010 }
+};
+
+// Note that this is the generic frequency to bits conversion,
+// it does not include the XL LP 1.6Hz exception
+uint8_t LSM6DSOXClass::nearestODRbits(float odr) {
+  auto upper_it = std::lower_bound(
+    ODR_freq_bits.begin(),
+    ODR_freq_bits.end()-1,
+    odr,
+    [](const std::pair<float, uint8_t>& p, float value) {return p.first < value;});
+  auto lower_it = upper_it->first <= odr ? upper_it : upper_it-1;
+  uint8_t odr_bits = abs(odr - lower_it->first) <
+                     abs(odr - upper_it->first) ?
+                      lower_it->second : upper_it->second;
+  return odr_bits;
+}
+
+float LSM6DSOXClass::getODRFromBits(uint8_t odr_bits) {
+  auto match = std::find_if(
+    ODR_freq_bits.begin(),
+    ODR_freq_bits.end(),
+    [odr_bits](const std::pair<float, uint8_t>& it){ return it.second == odr_bits; });
+  if(match != ODR_freq_bits.end()) {
+    return match->first;
+  }
+  return NAN;
 }
 
 #ifdef LSM6DS_DEFAULT_SPI
