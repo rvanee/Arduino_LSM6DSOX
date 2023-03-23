@@ -55,10 +55,42 @@
 
 // Bit masks
 #define MASK_ODR_XL                 0xF0  // CTRL1_XL
+#define MASK_FR_XL                  0x0C  // CTRL1_XL
 #define MASK_ODR_G                  0xF0  // CTRL2_G
+#define MASK_FR_G                   0x0E  // CTRL2_G
 #define MASK_XL_ULP_EN              0x80  // CTRL5_C
 #define MASK_XL_HM_MODE             0x10  // CTRL6_C
 #define MASK_G_HM_MODE              0x10  // CTRL7_G
+
+
+const vectorOfFloatsAndBits ODR_freq_bits = {
+  { 0,    0b0000 }, // means power-down
+  { 12.5, 0b0001 },
+  { 26,   0b0010 },
+  { 52,   0b0011 },
+  { 104,  0b0100 },
+  { 208,  0b0101 },
+  { 416,  0b0110 },
+  { 833,  0b0111 },
+  { 1667, 0b1000 },
+  { 3333, 0b1001 },
+  { 6667, 0b1010 }
+};
+
+const vectorOfFloatsAndBits FR_XL_bits = { // FS1_XL FS0_XL (CTRL1_XL)
+  {  2, 0b00 }, 
+  {  4, 0b10 }, 
+  {  8, 0b11 }, 
+  { 16, 0b01 }
+};
+
+const vectorOfFloatsAndBits FR_G_bits = { // FS1_G FS0_G FS_125 (CTRL2_G)
+  {  125, 0b001 }, 
+  {  250, 0b000 }, 
+  {  500, 0b010 }, 
+  { 1000, 0b100 }, 
+  { 2000, 0b110 }
+};
 
 
 LSM6DSOXClass::LSM6DSOXClass(TwoWire& wire, uint8_t slaveAddress) :
@@ -66,6 +98,9 @@ LSM6DSOXClass::LSM6DSOXClass(TwoWire& wire, uint8_t slaveAddress) :
   _spi(NULL),
   _slaveAddress(slaveAddress)
 {
+  // Full range not yet defined
+  fullRange_XL = NAN;
+  fullRange_G = NAN;
 }
 
 LSM6DSOXClass::LSM6DSOXClass(SPIClass& spi, int csPin, int irqPin) :
@@ -75,6 +110,9 @@ LSM6DSOXClass::LSM6DSOXClass(SPIClass& spi, int csPin, int irqPin) :
   _irqPin(irqPin),
   _spiSettings(10E6, MSBFIRST, SPI_MODE0)
 {
+  // Full range not yet defined
+  fullRange_XL = NAN;
+  fullRange_G = NAN;
 }
 
 LSM6DSOXClass::~LSM6DSOXClass()
@@ -83,6 +121,8 @@ LSM6DSOXClass::~LSM6DSOXClass()
 
 int LSM6DSOXClass::begin()
 {
+  int result = 1;
+
   if (_spi != NULL) {
     pinMode(_csPin, OUTPUT);
     digitalWrite(_csPin, HIGH);
@@ -109,7 +149,21 @@ int LSM6DSOXClass::begin()
   // Set the ODR config register to ODR/4
   writeRegister(LSM6DSOX_CTRL8_XL, 0x09);
 
-  return 1;
+  // Retrieve full range XL
+  result = readRegister(LSM6DSOX_CTRL1_XL);
+  if(result >= 0) {
+    uint8_t fr_bits = (result & MASK_FR_XL) >> 2;
+    fullRange_XL = getFloatFromBits(fr_bits, FR_XL_bits);
+  }
+
+  // Retrieve full range G
+  result = readRegister(LSM6DSOX_CTRL2_G);
+  if(result >= 0) {
+    uint8_t fr_bits = (result & MASK_FR_G) >> 1;
+    fullRange_G = getFloatFromBits(fr_bits, FR_G_bits);
+  }
+  
+  return result;
 }
 
 void LSM6DSOXClass::end()
@@ -225,6 +279,26 @@ int LSM6DSOXClass::setODR_G(float odr)
   return readModifyWriteRegister(LSM6DSOX_CTRL2_G, odr_bits << 4, MASK_ODR_G);
 }
 
+int LSM6DSOXClass::setFullRange_XL(float range) 
+{
+  uint8_t fr_bits = largerOrEqualFullRangeBits(range, FR_XL_bits);
+  int result = readModifyWriteRegister(LSM6DSOX_CTRL1_XL, fr_bits << 2, MASK_FR_XL);
+  if(result > 0) {
+    fullRange_XL = getFloatFromBits(fr_bits, FR_XL_bits);
+  }
+  return result;
+}
+
+int LSM6DSOXClass::setFullRange_G(float range) 
+{
+  uint8_t fr_bits = largerOrEqualFullRangeBits(range, FR_G_bits);
+  int result = readModifyWriteRegister(LSM6DSOX_CTRL2_G, fr_bits << 1, MASK_FR_G);
+  if(result > 0) {
+    fullRange_G = getFloatFromBits(fr_bits, FR_G_bits);
+  }
+  return result;
+}
+
 int LSM6DSOXClass::readAcceleration(float& x, float& y, float& z)
 {
   int16_t data[3];
@@ -237,9 +311,9 @@ int LSM6DSOXClass::readAcceleration(float& x, float& y, float& z)
     return 0;
   }
 
-  x = data[0] * 4.0 / 32768.0;
-  y = data[1] * 4.0 / 32768.0;
-  z = data[2] * 4.0 / 32768.0;
+  x = data[0] * fullRange_XL / 32768.0;
+  y = data[1] * fullRange_XL / 32768.0;
+  z = data[2] * fullRange_XL / 32768.0;
 
   return 1;
 }
@@ -265,7 +339,7 @@ float LSM6DSOXClass::accelerationSampleRate()
       if(ctrl6_c < 1) { return NAN; }
       return (ctrl6_c & MASK_XL_HM_MODE) ? 1.6 : 12.5;
     }
-    return getODRFromBits(odr_bits);
+    return getFloatFromBits(odr_bits, ODR_freq_bits);
   }
   return NAN;
 }
@@ -282,9 +356,9 @@ int LSM6DSOXClass::readGyroscope(float& x, float& y, float& z)
     return 0;
   }
 
-  x = data[0] * 2000.0 / 32768.0;
-  y = data[1] * 2000.0 / 32768.0;
-  z = data[2] * 2000.0 / 32768.0;
+  x = data[0] * fullRange_G / 32768.0;
+  y = data[1] * fullRange_G / 32768.0;
+  z = data[2] * fullRange_G / 32768.0;
 
   return 1;
 }
@@ -340,7 +414,7 @@ float LSM6DSOXClass::gyroscopeSampleRate()
   int result = readRegister(LSM6DSOX_CTRL2_G);
   if(result >= 0) {
     uint8_t odr_bits = ((uint8_t)result) >> 4;
-    return getODRFromBits(odr_bits);
+    return getFloatFromBits(odr_bits, ODR_freq_bits);
   }
   return NAN;
 }
@@ -413,26 +487,9 @@ int LSM6DSOXClass::readModifyWriteRegister(uint8_t address, uint8_t value, uint8
   return result;
 }
 
-/* 
-  ODR frequency <-> configuration bits conversion
-*/
-
-const std::vector<std::pair<float, uint8_t>> ODR_freq_bits = {
-  { 0,    0b0000 }, // means power-down
-  { 12.5, 0b0001 },
-  { 26,   0b0010 },
-  { 52,   0b0011 },
-  { 104,  0b0100 },
-  { 208,  0b0101 },
-  { 416,  0b0110 },
-  { 833,  0b0111 },
-  { 1667, 0b1000 },
-  { 3333, 0b1001 },
-  { 6667, 0b1010 }
-};
-
-// Note that this is the generic frequency to bits conversion,
+// This is the generic frequency to bits conversion,
 // it does not include the XL LP 1.6Hz exception
+// Find configuration bits for nearest odr value in table.
 uint8_t LSM6DSOXClass::nearestODRbits(float odr) {
   auto upper_it = std::lower_bound(
     ODR_freq_bits.begin(),
@@ -446,12 +503,20 @@ uint8_t LSM6DSOXClass::nearestODRbits(float odr) {
   return odr_bits;
 }
 
-float LSM6DSOXClass::getODRFromBits(uint8_t odr_bits) {
+// Find lowest full range in table >= specified range
+uint8_t LSM6DSOXClass::largerOrEqualFullRangeBits(float range, const vectorOfFloatsAndBits& v) {
+  auto range_it = std::lower_bound(
+    v.begin(), v.end()-1, range,
+    [](const std::pair<float, uint8_t>& p, float value) {return p.first < value;});
+  return range_it->second;
+}
+
+// Look up range from configuration bits
+float LSM6DSOXClass::getFloatFromBits(uint8_t bits, const vectorOfFloatsAndBits& v) {
   auto match = std::find_if(
-    ODR_freq_bits.begin(),
-    ODR_freq_bits.end(),
-    [odr_bits](const std::pair<float, uint8_t>& it){ return it.second == odr_bits; });
-  if(match != ODR_freq_bits.end()) {
+    v.begin(), v.end(),
+    [bits](const std::pair<float, uint8_t>& it){ return it.second == bits; });
+  if(match != v.end()) {
     return match->first;
   }
   return NAN;

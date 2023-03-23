@@ -38,6 +38,8 @@ enum PowerModeG {
   G_POWER_MODE_HP
 };
 
+typedef std::vector<std::pair<float, uint8_t>> vectorOfFloatsAndBits;
+
 class LSM6DSOXClass {
   public:
     LSM6DSOXClass(TwoWire& wire, uint8_t slaveAddress);
@@ -53,6 +55,12 @@ class LSM6DSOXClass {
 
     int setODR_XL(float odr);
     int setODR_G(float odr);
+
+    int setFullRange_XL(float range);
+    int setFullRange_G(float range);
+
+    float fullRange_XL;
+    float fullRange_G;
 
     // Accelerometer
     int readAcceleration(float& x, float& y, float& z); // Results are in g (earth gravity).
@@ -76,7 +84,8 @@ class LSM6DSOXClass {
     int readModifyWriteRegister(uint8_t address, uint8_t value, uint8_t mask);
 
     uint8_t nearestODRbits(float odr);
-    float getODRFromBits(uint8_t odr_bits);
+    uint8_t largerOrEqualFullRangeBits(float range, const vectorOfFloatsAndBits& v);
+    float getFloatFromBits(uint8_t bits, const vectorOfFloatsAndBits& v);
 
   private:
     TwoWire* _wire;
