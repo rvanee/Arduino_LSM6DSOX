@@ -56,13 +56,15 @@
 // Bit masks
 #define MASK_ODR_XL                 0xF0  // CTRL1_XL
 #define MASK_FR_XL                  0x0C  // CTRL1_XL
+#define MASK_LPF2_XL_EN             0x02  // CTRL1_XL
 #define MASK_ODR_G                  0xF0  // CTRL2_G
 #define MASK_FR_G                   0x0E  // CTRL2_G
 #define MASK_XL_ULP_EN              0x80  // CTRL5_C
 #define MASK_XL_HM_MODE             0x10  // CTRL6_C
 #define MASK_G_HM_MODE              0x10  // CTRL7_G
+#define MASK_HPCF_XL                0xE0  // CTRL8_XL
 
-
+// Output Data Rate configuration bits (excluding 1.6Hz XL LP) 
 const vectorOfFloatsAndBits ODR_freq_bits = {
   { 0,    0b0000 }, // means power-down
   { 12.5, 0b0001 },
@@ -77,6 +79,7 @@ const vectorOfFloatsAndBits ODR_freq_bits = {
   { 6667, 0b1010 }
 };
 
+// XL Full Range configuration bits
 const vectorOfFloatsAndBits FR_XL_bits = { // FS1_XL FS0_XL (CTRL1_XL)
   {  2, 0b00 }, 
   {  4, 0b10 }, 
@@ -84,12 +87,28 @@ const vectorOfFloatsAndBits FR_XL_bits = { // FS1_XL FS0_XL (CTRL1_XL)
   { 16, 0b01 }
 };
 
+// G Full Range configuration bits
 const vectorOfFloatsAndBits FR_G_bits = { // FS1_G FS0_G FS_125 (CTRL2_G)
   {  125, 0b001 }, 
   {  250, 0b000 }, 
   {  500, 0b010 }, 
   { 1000, 0b100 }, 
   { 2000, 0b110 }
+};
+
+// XL LPF2 ODR divisor configuration bits
+const vectorOfFloatsAndBits LPF2_XL_bits = { 
+  // bit 0: LPF2_XL_EN (CTRL1_XL)
+  // bits 1-3 HPCF_XL_[2:0] (CTRL8_XL)
+  {   2, 0b0000 }, // LPF2 disabled -> ODR/2 (LPF1)
+  {   4, 0b0001 },
+  {  10, 0b0011 }, 
+  {  20, 0b0101 }, 
+  {  45, 0b0111 }, 
+  { 100, 0b1001 },
+  { 200, 0b1011 }, 
+  { 400, 0b1101 },
+  { 800, 0b1111 }
 };
 
 
@@ -281,7 +300,7 @@ int LSM6DSOXClass::setODR_G(float odr)
 
 int LSM6DSOXClass::setFullRange_XL(float range) 
 {
-  uint8_t fr_bits = largerOrEqualFullRangeBits(range, FR_XL_bits);
+  uint8_t fr_bits = largerOrEqualFloatToBits(range, FR_XL_bits);
   int result = readModifyWriteRegister(LSM6DSOX_CTRL1_XL, fr_bits << 2, MASK_FR_XL);
   if(result > 0) {
     fullRange_XL = getFloatFromBits(fr_bits, FR_XL_bits);
@@ -291,10 +310,22 @@ int LSM6DSOXClass::setFullRange_XL(float range)
 
 int LSM6DSOXClass::setFullRange_G(float range) 
 {
-  uint8_t fr_bits = largerOrEqualFullRangeBits(range, FR_G_bits);
+  uint8_t fr_bits = largerOrEqualFloatToBits(range, FR_G_bits);
   int result = readModifyWriteRegister(LSM6DSOX_CTRL2_G, fr_bits << 1, MASK_FR_G);
   if(result > 0) {
     fullRange_G = getFloatFromBits(fr_bits, FR_G_bits);
+  }
+  return result;
+}
+
+int LSM6DSOXClass::setLPF2_XL(float odr_divisor) 
+{
+  uint8_t lpf2_bits = largerOrEqualFloatToBits(odr_divisor, LPF2_XL_bits);
+  uint8_t lpf2_xl_en = lpf2_bits & 0x01;
+  int result = readModifyWriteRegister(LSM6DSOX_CTRL1_XL, lpf2_xl_en << 1, MASK_LPF2_XL_EN);
+  if(result > 0) {
+    uint8_t hpcf_xl = lpf2_bits >> 1;
+    result = readModifyWriteRegister(LSM6DSOX_CTRL8_XL, hpcf_xl << 5, MASK_HPCF_XL);
   }
   return result;
 }
@@ -504,7 +535,7 @@ uint8_t LSM6DSOXClass::nearestODRbits(float odr) {
 }
 
 // Find lowest full range in table >= specified range
-uint8_t LSM6DSOXClass::largerOrEqualFullRangeBits(float range, const vectorOfFloatsAndBits& v) {
+uint8_t LSM6DSOXClass::largerOrEqualFloatToBits(float range, const vectorOfFloatsAndBits& v) {
   auto range_it = std::lower_bound(
     v.begin(), v.end()-1, range,
     [](const std::pair<float, uint8_t>& p, float value) {return p.first < value;});

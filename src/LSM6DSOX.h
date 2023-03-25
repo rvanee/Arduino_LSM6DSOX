@@ -62,6 +62,8 @@ class LSM6DSOXClass {
     float fullRange_XL;
     float fullRange_G;
 
+    int setLPF2_XL(float odr_divisor);
+
     // Accelerometer
     int readAcceleration(float& x, float& y, float& z); // Results are in g (earth gravity).
     float accelerationSampleRate(); // Sampling rate of the sensor.
@@ -84,7 +86,7 @@ class LSM6DSOXClass {
     int readModifyWriteRegister(uint8_t address, uint8_t value, uint8_t mask);
 
     uint8_t nearestODRbits(float odr);
-    uint8_t largerOrEqualFullRangeBits(float range, const vectorOfFloatsAndBits& v);
+    uint8_t largerOrEqualFloatToBits(float range, const vectorOfFloatsAndBits& v);
     float getFloatFromBits(uint8_t bits, const vectorOfFloatsAndBits& v);
 
   private:
