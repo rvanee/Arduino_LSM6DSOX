@@ -35,6 +35,7 @@
 #define LSM6DSOX_CTRL6_C            0X15
 #define LSM6DSOX_CTRL7_G            0X16
 #define LSM6DSOX_CTRL8_XL           0X17
+#define LSM6DSOX_CTRL10_C           0X19
 
 #define LSM6DSOX_STATUS_REG         0X1E
 
@@ -55,6 +56,13 @@
 #define LSM6DSOX_OUTZ_L_XL          0X2C
 #define LSM6DSOX_OUTZ_H_XL          0X2D
 
+#define LSM6DSOX_TIMESTAMP0         0x40
+#define LSM6DSOX_TIMESTAMP1         0x41
+#define LSM6DSOX_TIMESTAMP2         0x42
+#define LSM6DSOX_TIMESTAMP3         0x43
+
+#define LSM6DSOX_INTERNAL_FREQ_FINE 0x63
+
 
 // Bit masks
 #define MASK_ODR_XL                 0xF0  // CTRL1_XL
@@ -71,6 +79,7 @@
 #define MASK_HP_EN_G                0x40  // CTRL7_G
 #define MASK_G_HM_MODE              0x80  // CTRL7_G
 #define MASK_HPCF_XL                0xE0  // CTRL8_XL
+#define MASK_TIMESTAMP_EN           0x20  // CTRL10_C
 
 // Output Data Rate configuration bits (excluding 1.6Hz XL LP) 
 const vectorOfFloatsAndBits ODR_freq_bits = {
@@ -248,7 +257,8 @@ const vectorOfFloatsAndBits HPF_G_bits = {
 LSM6DSOXClass::LSM6DSOXClass(TwoWire& wire, uint8_t slaveAddress) :
   _wire(&wire),
   _spi(NULL),
-  _slaveAddress(slaveAddress)
+  _slaveAddress(slaveAddress),
+  _internalFrequencyFactor(25E-6)
 {
   initializeSettings();
 
@@ -262,7 +272,8 @@ LSM6DSOXClass::LSM6DSOXClass(SPIClass& spi, int csPin, int irqPin) :
   _spi(&spi),
   _csPin(csPin),
   _irqPin(irqPin),
-  _spiSettings(10E6, MSBFIRST, SPI_MODE0)
+  _spiSettings(10E6, MSBFIRST, SPI_MODE0),
+  _internalFrequencyFactor(25E-6)
 {
   initializeSettings();
 
@@ -283,6 +294,7 @@ void LSM6DSOXClass::initializeSettings(
       PowerModeXL powerMode_XL,
       PowerModeG powerMode_G,
       int i2c_frequency,
+      bool enable_timestamp,
       bool BDU)
 {
   settings.ODR_XL = ODR_XL;
@@ -295,6 +307,7 @@ void LSM6DSOXClass::initializeSettings(
   settings.powerMode_XL = powerMode_XL;
   settings.powerMode_G = powerMode_G;
   settings.i2c_frequency = i2c_frequency;
+  settings.enable_timestamp = enable_timestamp;
   settings.BDU = BDU;
 }
 
@@ -337,10 +350,23 @@ int LSM6DSOXClass::begin()
   setLPF1_G(settings.cutoff_LPF1_G, settings.ODR_G);
   setHPF_G(settings.cutoff_HPF_G);
 
+  // Timestamp enable
+  uint8_t timestamp_en = settings.enable_timestamp ? MASK_TIMESTAMP_EN : 0x00;
+  readModifyWriteRegister(LSM6DSOX_CTRL10_C, timestamp_en, MASK_TIMESTAMP_EN);
+
   // BDU
   uint8_t BDU_bit = settings.BDU ? MASK_BDU : 0x00;
-  result = readModifyWriteRegister(LSM6DSOX_CTRL3_C, BDU_bit, MASK_BDU);
-  
+  readModifyWriteRegister(LSM6DSOX_CTRL3_C, BDU_bit, MASK_BDU);
+
+  // Find internal frequency correction factor
+  result = readRegister(LSM6DSOX_INTERNAL_FREQ_FINE);
+  if(result >= 0) {
+    // 8-bit 2's complement
+    int freq_fine = (result & 0x80) ? result - 256 : result;
+    // See AN5272, par 6.4
+    _internalFrequencyFactor = 1 / (40000 * (1 + (0.0015 * freq_fine)));
+    result = 1;
+  }
   return result;
 }
 
@@ -665,6 +691,33 @@ int LSM6DSOXClass::readRegister(uint8_t address)
     return -1;
   }
   return value;
+}
+
+int LSM6DSOXClass::readTimestamp(uint32_t& timestamp) {
+  uint8_t buffer[4];
+  int result = readRegisters(LSM6DSOX_TIMESTAMP0, buffer, 4);
+  if(result == 1) {
+    timestamp = (((uint32_t)buffer[3]) << 24) | 
+                (((uint32_t)buffer[2]) << 16) |
+                (((uint32_t)buffer[1]) <<  8) |
+                 ((uint32_t)buffer[0]);
+  }
+  return result;
+}
+
+int LSM6DSOXClass::readTimestampDouble(double& timestamp) {
+  uint32_t t;
+  int result = readTimestamp(t);
+  if(result == 1) {
+    // See AN5272, par 6.4
+    timestamp = t * _internalFrequencyFactor;
+  }
+  return result;
+}
+
+int LSM6DSOXClass::resetTimestamp() {
+  // See AN5272, par. 6.4
+  return writeRegister(LSM6DSOX_TIMESTAMP2, 0xAA);
 }
 
 int LSM6DSOXClass::readRegisters(uint8_t address, uint8_t* data, size_t length)

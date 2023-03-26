@@ -52,6 +52,7 @@ public:
   PowerModeXL powerMode_XL;
   PowerModeG  powerMode_G;
   int         i2c_frequency;
+  bool        enable_timestamp;
   bool        BDU;
 };
 
@@ -72,6 +73,7 @@ class LSM6DSOXClass {
       PowerModeXL powerMode_XL = XL_POWER_MODE_HP,
       PowerModeG powerMode_G = G_POWER_MODE_HP,
       int i2c_frequency = 100000,
+      bool enable_timestamp = true,
       bool BDU = false);
 
     int begin();
@@ -106,6 +108,11 @@ class LSM6DSOXClass {
     int readTemperatureFloat(float& temperature_deg);
     int temperatureAvailable();
 
+    // Timestamp
+    int readTimestamp(uint32_t& timestamp);
+    int readTimestampDouble(double& timestamp);
+    int resetTimestamp();
+
   public:
     //IMU settings
     SensorSettings settings;
@@ -133,6 +140,8 @@ class LSM6DSOXClass {
     int _irqPin;
 
     SPISettings _spiSettings;
+
+    float _internalFrequencyFactor;
 };
 
 extern LSM6DSOXClass IMU_LSM6DSOX;
