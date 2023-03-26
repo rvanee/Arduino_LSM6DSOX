@@ -40,27 +40,48 @@ enum PowerModeG {
 
 typedef std::vector<std::pair<float, uint8_t>> vectorOfFloatsAndBits;
 
+struct SensorSettings {
+public:
+  float       ODR_XL;
+  float       ODR_G;
+  float       fullRange_XL;
+  float       fullRange_G;
+  float       cutoff_LPF2_XL;
+  PowerModeXL powerMode_XL;
+  PowerModeG  powerMode_G;
+  int         i2c_frequency;
+  bool        BDU;
+};
+
 class LSM6DSOXClass {
   public:
     LSM6DSOXClass(TwoWire& wire, uint8_t slaveAddress);
     LSM6DSOXClass(SPIClass& spi, int csPin, int irqPin);
     ~LSM6DSOXClass();
+    
+    void initializeSettings(
+      float ODR_XL = 104,
+      float ODR_G = 104, 
+      float fullRange_XL = 4,
+      float fullRange_G = 2000,
+      float cutoff_LPF2_XL = 52,
+      PowerModeXL powerMode_XL = XL_POWER_MODE_HP,
+      PowerModeG powerMode_G = G_POWER_MODE_HP,
+      int i2c_frequency = 100000,
+      bool BDU = false);
 
     int begin();
     void end();
 
     // Configuration
-    int setPowerModeXL(PowerModeXL power_XL);
-    int setPowerModeG(PowerModeG power_G);
+    int setPowerModeXL(PowerModeXL powerMode_XL);
+    int setPowerModeG(PowerModeG powerMode_G);
 
     int setODR_XL(float odr);
     int setODR_G(float odr);
 
     int setFullRange_XL(float range);
     int setFullRange_G(float range);
-
-    float fullRange_XL;
-    float fullRange_G;
 
     int setLPF2_XL(float odr_divisor);
 
@@ -78,6 +99,14 @@ class LSM6DSOXClass {
     int readTemperature(int& temperature_deg);
     int readTemperatureFloat(float& temperature_deg);
     int temperatureAvailable();
+
+  public:
+    //IMU settings
+    SensorSettings settings;
+
+    // Actual full range values. These are updated upon each configuration change
+    float fullRange_XL;
+    float fullRange_G;
 
   private:
     int readRegister(uint8_t address);

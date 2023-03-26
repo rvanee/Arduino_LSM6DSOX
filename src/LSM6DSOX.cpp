@@ -20,6 +20,7 @@
 #include "LSM6DSOX.h"
 
 #include <algorithm>  // lower_bound
+#include <cmath>      // round
 #include <math.h>     // NAN
 
 #define LSM6DSOX_ADDRESS            0x6A
@@ -27,7 +28,8 @@
 #define LSM6DSOX_WHO_AM_I_REG       0X0F
 #define LSM6DSOX_CTRL1_XL           0X10
 #define LSM6DSOX_CTRL2_G            0X11
-
+#define LSM6DSOX_CTRL3_C            0X12
+#define LSM6DSOX_CTRL4_C            0X13
 #define LSM6DSOX_CTRL5_C            0X14
 #define LSM6DSOX_CTRL6_C            0X15
 #define LSM6DSOX_CTRL7_G            0X16
@@ -59,9 +61,10 @@
 #define MASK_LPF2_XL_EN             0x02  // CTRL1_XL
 #define MASK_ODR_G                  0xF0  // CTRL2_G
 #define MASK_FR_G                   0x0E  // CTRL2_G
+#define MASK_BDU                    0x40  // CTRL3_C
 #define MASK_XL_ULP_EN              0x80  // CTRL5_C
 #define MASK_XL_HM_MODE             0x10  // CTRL6_C
-#define MASK_G_HM_MODE              0x10  // CTRL7_G
+#define MASK_G_HM_MODE              0x80  // CTRL7_G
 #define MASK_HPCF_XL                0xE0  // CTRL8_XL
 
 // Output Data Rate configuration bits (excluding 1.6Hz XL LP) 
@@ -117,6 +120,8 @@ LSM6DSOXClass::LSM6DSOXClass(TwoWire& wire, uint8_t slaveAddress) :
   _spi(NULL),
   _slaveAddress(slaveAddress)
 {
+  initializeSettings();
+
   // Full range not yet defined
   fullRange_XL = NAN;
   fullRange_G = NAN;
@@ -129,6 +134,8 @@ LSM6DSOXClass::LSM6DSOXClass(SPIClass& spi, int csPin, int irqPin) :
   _irqPin(irqPin),
   _spiSettings(10E6, MSBFIRST, SPI_MODE0)
 {
+  initializeSettings();
+
   // Full range not yet defined
   fullRange_XL = NAN;
   fullRange_G = NAN;
@@ -136,6 +143,26 @@ LSM6DSOXClass::LSM6DSOXClass(SPIClass& spi, int csPin, int irqPin) :
 
 LSM6DSOXClass::~LSM6DSOXClass()
 {
+}
+
+void LSM6DSOXClass::initializeSettings(
+      float ODR_XL, float ODR_G, 
+      float fullRange_XL, float fullRange_G,
+      float cutoff_LPF2_XL,
+      PowerModeXL powerMode_XL,
+      PowerModeG powerMode_G,
+      int i2c_frequency,
+      bool BDU)
+{
+  settings.ODR_XL = ODR_XL;
+  settings.ODR_G = ODR_G;
+  settings.fullRange_XL = fullRange_XL;
+  settings.fullRange_G = fullRange_G;
+  settings.cutoff_LPF2_XL = cutoff_LPF2_XL;
+  settings.powerMode_XL = powerMode_XL;
+  settings.powerMode_G = powerMode_G;
+  settings.i2c_frequency = i2c_frequency;
+  settings.BDU = BDU;
 }
 
 int LSM6DSOXClass::begin()
@@ -148,6 +175,7 @@ int LSM6DSOXClass::begin()
     _spi->begin();
   } else {
     _wire->begin();
+    _wire->setClock(settings.i2c_frequency);
   }
   // See datasheet: WHO AM I is fixed at 0x6C
   if (readRegister(LSM6DSOX_WHO_AM_I_REG) != 0x6C) {
@@ -155,27 +183,36 @@ int LSM6DSOXClass::begin()
     return 0;
   }
 
-  //set the gyroscope control register to work at 104 Hz, 2000 dps and in bypass mode
-  writeRegister(LSM6DSOX_CTRL2_G, 0x4C);
+  // Power modes. First set G power mode, since it should be set
+  // to power down prior to setting XL ULP in mode (it doesn't matter
+  // for other combinations).
+  setPowerModeG(settings.powerMode_G);
+  setPowerModeXL(settings.powerMode_XL);
 
-  // Set the Accelerometer control register to work at 104 Hz, 4 g,and in bypass mode and enable ODR/4
-  // low pass filter (check figure9 of LSM6DSOX's datasheet)
-  writeRegister(LSM6DSOX_CTRL1_XL, 0x4A);
+  // Output Data Rates
+  setODR_XL(settings.ODR_XL);
+  setODR_G(settings.ODR_G);
 
-  // set gyroscope power mode to high performance and bandwidth to 16 MHz
-  writeRegister(LSM6DSOX_CTRL7_G, 0x00);
+  // Full ranges
+  setFullRange_XL(settings.fullRange_XL);
+  setFullRange_G(settings.fullRange_G);
 
-  // Set the ODR config register to ODR/4
-  writeRegister(LSM6DSOX_CTRL8_XL, 0x09);
+  // XL LPF2
+  float divisor = std::round(settings.ODR_XL / settings.cutoff_LPF2_XL);
+  setLPF2_XL(divisor);
 
-  // Retrieve full range XL
+  // BDU
+  uint8_t BDU_bit = settings.BDU ? MASK_BDU : 0x00;
+  result = readModifyWriteRegister(LSM6DSOX_CTRL3_C, BDU_bit, MASK_BDU);
+
+  // Retrieve full range XL (it may differ from the ODR_XL setting)
   result = readRegister(LSM6DSOX_CTRL1_XL);
   if(result >= 0) {
     uint8_t fr_bits = (result & MASK_FR_XL) >> 2;
     fullRange_XL = getFloatFromBits(fr_bits, FR_XL_bits);
   }
 
-  // Retrieve full range G
+  // Retrieve full range G (it may differ from the ODR_G setting)
   result = readRegister(LSM6DSOX_CTRL2_G);
   if(result >= 0) {
     uint8_t fr_bits = (result & MASK_FR_G) >> 1;
@@ -221,7 +258,7 @@ int LSM6DSOXClass::setPowerModeXL(PowerModeXL power_XL)
       result = readModifyWriteRegister(LSM6DSOX_CTRL6_C, 0x00, MASK_XL_HM_MODE);
       if(result < 1) { return result; }
       // Now set XL_ULP_EN to 1
-      result = readModifyWriteRegister(LSM6DSOX_CTRL5_C, 0x80, MASK_XL_ULP_EN);
+      result = readModifyWriteRegister(LSM6DSOX_CTRL5_C, MASK_XL_ULP_EN, MASK_XL_ULP_EN);
       if(result < 1) { return result; }
       break;
 
@@ -230,7 +267,7 @@ int LSM6DSOXClass::setPowerModeXL(PowerModeXL power_XL)
       result = readModifyWriteRegister(LSM6DSOX_CTRL5_C, 0x00, MASK_XL_ULP_EN);
       if(result < 1) { return result; }
       // Set XL_HM_MODE to 1
-      result = readModifyWriteRegister(LSM6DSOX_CTRL6_C, 0x10, MASK_XL_HM_MODE);
+      result = readModifyWriteRegister(LSM6DSOX_CTRL6_C, MASK_XL_HM_MODE, MASK_XL_HM_MODE);
       if(result < 1) { return result; }
       break;
 
@@ -261,7 +298,7 @@ int LSM6DSOXClass::setPowerModeG(PowerModeG power_G)
 
     case G_POWER_MODE_LP_NORMAL:
       // Set G_HM_MODE to 1
-      result = readModifyWriteRegister(LSM6DSOX_CTRL7_G, 0x10, MASK_G_HM_MODE);
+      result = readModifyWriteRegister(LSM6DSOX_CTRL7_G, MASK_G_HM_MODE, MASK_G_HM_MODE);
       if(result < 1) { return result; }
       break;
 
