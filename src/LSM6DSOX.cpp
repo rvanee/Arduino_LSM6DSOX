@@ -22,6 +22,7 @@
 #include <algorithm>  // lower_bound
 #include <cmath>      // round
 #include <math.h>     // NAN
+#include <map>
 
 #define LSM6DSOX_ADDRESS            0x6A
 
@@ -62,8 +63,10 @@
 #define MASK_ODR_G                  0xF0  // CTRL2_G
 #define MASK_FR_G                   0x0E  // CTRL2_G
 #define MASK_BDU                    0x40  // CTRL3_C
+#define MASK_LPF1_SEL_G             0x02  // CTRL4_C
 #define MASK_XL_ULP_EN              0x80  // CTRL5_C
 #define MASK_XL_HM_MODE             0x10  // CTRL6_C
+#define MASK_FTYPE                  0x07  // CTRL6_C
 #define MASK_G_HM_MODE              0x80  // CTRL7_G
 #define MASK_HPCF_XL                0xE0  // CTRL8_XL
 
@@ -114,6 +117,120 @@ const vectorOfFloatsAndBits LPF2_XL_bits = {
   { 800, 0b1111 }
 };
 
+// Map of G ODR bits to sorted vector of cutoff frequency and 
+// configuration bit pairs:
+// bit 0: LPF1_SEL_G (CTRL4_C)
+// bits 1..3: FTYPE_2 FTYPE_1 FTYPE_0 (CTRL6_C)
+//
+// Note that below wherever 'LPF1 disabled' is stated, the cutoff
+// frequency is set to an arbitrary number slightly below ODR/2,
+// in order for this value to be selected when presented with
+// a cutoff of ODR/2. This will lead to G LPF1 being disabled. 
+const std::map<uint8_t, vectorOfFloatsAndBits> LPF1_G_bits = {
+  { 0b0001,  // ODR G = 12.5 Hz
+    {
+      {    3.9, 0b1111 },
+      {    4.1, 0b1101 },
+      {    4.2, 0b0001 },
+      {    6.2, 0b0000 } // LPF1 disabled, see above
+    }
+  },
+  { 0b0010,  // ODR G = 26 Hz
+    {
+      {    6.7, 0b1111 },
+      {    7.8, 0b1101 },
+      {    8.3, 0b0001 },
+      {   12.0, 0b0000 } // LPF1 disabled, see above
+    }
+  },
+  { 0b0011,  // ODR G = 52 Hz
+    {
+      {    9.7, 0b1111 },
+      {   13.4, 0b1101 },
+      {   16.6, 0b0001 },
+      {   16.7, 0b1001 },
+      {   16.8, 0b1011 },
+      {   25.0, 0b0000 } // LPF1 disabled, see above
+    }
+  },
+  { 0b0100,  // ODR G = 104 Hz
+    {
+      {   11.5, 0b1111 },
+      {   19.0, 0b1101 },
+      {   31.0, 0b1011 },
+      {   33.0, 0b0001 },
+      {   51.0, 0b0000 } // LPF1 disabled, see above
+    }
+  },
+  { 0b0101,  // ODR G = 208 Hz
+    {
+      {   12.2, 0b1111 },
+      {   23.1, 0b1101 },
+      {   43.2, 0b1011 },
+      {   62.4, 0b1001 },
+      {   67.0, 0b0001 },
+      {  103.0, 0b0000 } // LPF1 disabled, see above
+    }
+  },
+  { 0b0110,  // ODR G = 416 Hz
+    {
+      {   12.4, 0b1111 },
+      {   24.6, 0b1101 },
+      {   48.0, 0b1011 },
+      {   86.7, 0b1001 },
+      {  120.3, 0b0101 },
+      {  130.5, 0b0011 },
+      {  136.6, 0b0001 },
+      {  137.1, 0b0111 },
+      {  207.0, 0b0000 } // LPF1 disabled, see above
+    }
+  },
+  { 0b0111,  // ODR G = 833 Hz
+    {
+      {   12.5, 0b1111 },
+      {   25.0, 0b1101 },
+      {   49.4, 0b1011 },
+      {   96.6, 0b1001 },
+      {  154.2, 0b0101 },
+      {  192.4, 0b0011 },
+      {  239.2, 0b0001 },
+      {  281.8, 0b0111 },
+      {  416.0, 0b0000 } // LPF1 disabled, see above
+    }
+  },
+  { 0b1000, // ODR G = 1667 Hz
+    {
+      {   12.5, 0b1111 },
+      {   25.1, 0b1101 },
+      {   49.8, 0b1011 },
+      {   99.6, 0b1001 },
+      {  166.6, 0b0101 },
+      {  220.7, 0b0011 },
+      {  304.2, 0b0001 },
+      {  453.2, 0b0111 },
+      {  833.0, 0b0000 } // LPF1 disabled, see above
+    }
+  },
+  { 0b1001, // ODR G = 3333 Hz
+    {
+      {  170.1, 0b0101 },
+      {  229.6, 0b0011 },
+      {  328.5, 0b0001 },
+      {  559.2, 0b0111 },
+      { 1666.0, 0b0000 } // LPF1 disabled, see above
+    }
+  },
+  { 0b1010, // ODR G = 6667 Hz
+    {
+      {  171.1, 0b0101 },
+      {  232.0, 0b0011 },
+      {  335.5, 0b0001 },
+      {  609.0, 0b0111 },
+      { 3333.0, 0b0000 } // LPF1 disabled, see above
+    }
+  }
+};
+
 
 LSM6DSOXClass::LSM6DSOXClass(TwoWire& wire, uint8_t slaveAddress) :
   _wire(&wire),
@@ -148,7 +265,7 @@ LSM6DSOXClass::~LSM6DSOXClass()
 void LSM6DSOXClass::initializeSettings(
       float ODR_XL, float ODR_G, 
       float fullRange_XL, float fullRange_G,
-      float cutoff_LPF2_XL,
+      float cutoff_LPF2_XL, float cutoff_LPF1_G,
       PowerModeXL powerMode_XL,
       PowerModeG powerMode_G,
       int i2c_frequency,
@@ -159,6 +276,7 @@ void LSM6DSOXClass::initializeSettings(
   settings.fullRange_XL = fullRange_XL;
   settings.fullRange_G = fullRange_G;
   settings.cutoff_LPF2_XL = cutoff_LPF2_XL;
+  settings.cutoff_LPF1_G = cutoff_LPF1_G;
   settings.powerMode_XL = powerMode_XL;
   settings.powerMode_G = powerMode_G;
   settings.i2c_frequency = i2c_frequency;
@@ -198,26 +316,14 @@ int LSM6DSOXClass::begin()
   setFullRange_G(settings.fullRange_G);
 
   // XL LPF2
-  float divisor = std::round(settings.ODR_XL / settings.cutoff_LPF2_XL);
-  setLPF2_XL(divisor);
+  setLPF2_XL(settings.cutoff_LPF2_XL);
+
+  // G LPF1
+  setLPF1_G(settings.cutoff_LPF1_G);
 
   // BDU
   uint8_t BDU_bit = settings.BDU ? MASK_BDU : 0x00;
   result = readModifyWriteRegister(LSM6DSOX_CTRL3_C, BDU_bit, MASK_BDU);
-
-  // Retrieve full range XL (it may differ from the ODR_XL setting)
-  result = readRegister(LSM6DSOX_CTRL1_XL);
-  if(result >= 0) {
-    uint8_t fr_bits = (result & MASK_FR_XL) >> 2;
-    fullRange_XL = getFloatFromBits(fr_bits, FR_XL_bits);
-  }
-
-  // Retrieve full range G (it may differ from the ODR_G setting)
-  result = readRegister(LSM6DSOX_CTRL2_G);
-  if(result >= 0) {
-    uint8_t fr_bits = (result & MASK_FR_G) >> 1;
-    fullRange_G = getFloatFromBits(fr_bits, FR_G_bits);
-  }
   
   return result;
 }
@@ -337,9 +443,13 @@ int LSM6DSOXClass::setODR_G(float odr)
 
 int LSM6DSOXClass::setFullRange_XL(float range) 
 {
+  // Find Full Range value that is at least as large as the specified range,
+  // so expected values will always fit. Then select corresponding configuration
+  // bits.
   uint8_t fr_bits = largerOrEqualFloatToBits(range, FR_XL_bits);
   int result = readModifyWriteRegister(LSM6DSOX_CTRL1_XL, fr_bits << 2, MASK_FR_XL);
   if(result > 0) {
+    // Store selected full range
     fullRange_XL = getFloatFromBits(fr_bits, FR_XL_bits);
   }
   return result;
@@ -347,22 +457,51 @@ int LSM6DSOXClass::setFullRange_XL(float range)
 
 int LSM6DSOXClass::setFullRange_G(float range) 
 {
+  // Find Full Range value that is at least as large as the specified range,
+  // so expected values will always fit. Then select corresponding configuration
+  // bits.
   uint8_t fr_bits = largerOrEqualFloatToBits(range, FR_G_bits);
   int result = readModifyWriteRegister(LSM6DSOX_CTRL2_G, fr_bits << 1, MASK_FR_G);
   if(result > 0) {
+    // Store selected full range
     fullRange_G = getFloatFromBits(fr_bits, FR_G_bits);
   }
   return result;
 }
 
-int LSM6DSOXClass::setLPF2_XL(float odr_divisor) 
+int LSM6DSOXClass::setLPF2_XL(float cutoff) 
 {
+  // Cutoff is converted to an ODR divisor. Note that cutoff should be > 0!
+  float odr_divisor = std::round(settings.ODR_XL / cutoff);
+  // Find the smallest divisor that is larger than or equal to the divisor
+  // found above, and extract the corresponding configuration bits.
   uint8_t lpf2_bits = largerOrEqualFloatToBits(odr_divisor, LPF2_XL_bits);
+  // Bit 0 of the bit pattern corresponds to LPF2_XL_EN (CTRL1_XL)
   uint8_t lpf2_xl_en = lpf2_bits & 0x01;
   int result = readModifyWriteRegister(LSM6DSOX_CTRL1_XL, lpf2_xl_en << 1, MASK_LPF2_XL_EN);
   if(result > 0) {
+    // Bits 1..3 correspond to HPCF_XL (CTRL8_XL)
     uint8_t hpcf_xl = lpf2_bits >> 1;
     result = readModifyWriteRegister(LSM6DSOX_CTRL8_XL, hpcf_xl << 5, MASK_HPCF_XL);
+  }
+  return result;
+}
+
+int LSM6DSOXClass::setLPF1_G(float cutoff) 
+{
+  // First, look up ODR bits from G ODR settings
+  uint8_t odr_bits = nearestODRbits(settings.ODR_G);
+  // Find vector of cutoff frequencies and configuration bits corresponding to G ODR
+  auto freq_bits_vector = LPF1_G_bits.at(odr_bits);
+  // Now find the cutoff that is <= specified cutoff
+  uint8_t lpf1_bits = smallerOrEqualFloatToBits(cutoff, freq_bits_vector);
+  // Bit 0 of the bit pattern corresponds to LPF1_SEL_G (CTRL4_C)
+  uint8_t lpf1_sel_g = lpf1_bits & 0x01;
+  int result = readModifyWriteRegister(LSM6DSOX_CTRL4_C, lpf1_sel_g << 1, MASK_LPF1_SEL_G);
+  if(result > 0) {
+    // Bits 1..3 of the bit pattern correspond to FTYPE_[0-2] (CTRL6_C)
+    uint8_t ftype = lpf1_bits >> 1;
+    result = readModifyWriteRegister(LSM6DSOX_CTRL6_C, ftype, MASK_FTYPE);
   }
   return result;
 }
@@ -571,12 +710,23 @@ uint8_t LSM6DSOXClass::nearestODRbits(float odr) {
   return odr_bits;
 }
 
-// Find lowest full range in table >= specified range
-uint8_t LSM6DSOXClass::largerOrEqualFloatToBits(float range, const vectorOfFloatsAndBits& v) {
-  auto range_it = std::lower_bound(
-    v.begin(), v.end()-1, range,
-    [](const std::pair<float, uint8_t>& p, float value) {return p.first < value;});
-  return range_it->second;
+// Find lowest full range in table >= specified value
+uint8_t LSM6DSOXClass::largerOrEqualFloatToBits(float value, const vectorOfFloatsAndBits& v) {
+  auto value_it = std::lower_bound(
+    v.begin(), v.end()-1, value,
+    [](const std::pair<float, uint8_t>& p, float val) {return p.first < val;});
+  return value_it->second;
+}
+
+// Find lowest full range in table <= specified value
+uint8_t LSM6DSOXClass::smallerOrEqualFloatToBits(float value, const vectorOfFloatsAndBits& v) {
+  auto value_it = std::lower_bound(
+    v.begin(), v.end(), value,
+    [](const std::pair<float, uint8_t>& p, float val) {return p.first < val;});
+  if((value_it != v.begin()) && (value_it->first > value)) {
+    value_it = value_it - 1;
+  }
+  return value_it->second;
 }
 
 // Look up range from configuration bits
