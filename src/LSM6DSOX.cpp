@@ -67,6 +67,8 @@
 #define MASK_XL_ULP_EN              0x80  // CTRL5_C
 #define MASK_XL_HM_MODE             0x10  // CTRL6_C
 #define MASK_FTYPE                  0x07  // CTRL6_C
+#define MASK_HPM_G                  0x30  // CTRL7_G
+#define MASK_HP_EN_G                0x40  // CTRL7_G
 #define MASK_G_HM_MODE              0x80  // CTRL7_G
 #define MASK_HPCF_XL                0xE0  // CTRL8_XL
 
@@ -231,6 +233,17 @@ const std::map<uint8_t, vectorOfFloatsAndBits> LPF1_G_bits = {
   }
 };
 
+// G HPF cutoff / configuration bits
+const vectorOfFloatsAndBits HPF_G_bits = { 
+  // bit 0: HP_EN_G (CTRL7_G)
+  // bits 1-2 HPM_G[1:0] (CTRL7_G)
+  { 0,     0b000 }, // HPF disabled
+  { 0.016, 0b001 },
+  { 0.065, 0b011 }, 
+  { 0.260, 0b101 }, 
+  { 1.04,  0b111 }
+};
+
 
 LSM6DSOXClass::LSM6DSOXClass(TwoWire& wire, uint8_t slaveAddress) :
   _wire(&wire),
@@ -266,6 +279,7 @@ void LSM6DSOXClass::initializeSettings(
       float ODR_XL, float ODR_G, 
       float fullRange_XL, float fullRange_G,
       float cutoff_LPF2_XL, float cutoff_LPF1_G,
+      float cutoff_HPF_G,
       PowerModeXL powerMode_XL,
       PowerModeG powerMode_G,
       int i2c_frequency,
@@ -277,6 +291,7 @@ void LSM6DSOXClass::initializeSettings(
   settings.fullRange_G = fullRange_G;
   settings.cutoff_LPF2_XL = cutoff_LPF2_XL;
   settings.cutoff_LPF1_G = cutoff_LPF1_G;
+  settings.cutoff_HPF_G = cutoff_HPF_G;
   settings.powerMode_XL = powerMode_XL;
   settings.powerMode_G = powerMode_G;
   settings.i2c_frequency = i2c_frequency;
@@ -302,8 +317,8 @@ int LSM6DSOXClass::begin()
   }
 
   // Power modes. First set G power mode, since it should be set
-  // to power down prior to setting XL ULP in mode (it doesn't matter
-  // for other combinations).
+  // to power down prior to setting XL to ULP mode (sequence is
+  // irrelevant for other power mode combinations).
   setPowerModeG(settings.powerMode_G);
   setPowerModeXL(settings.powerMode_XL);
 
@@ -316,10 +331,11 @@ int LSM6DSOXClass::begin()
   setFullRange_G(settings.fullRange_G);
 
   // XL LPF2
-  setLPF2_XL(settings.cutoff_LPF2_XL);
+  setLPF2_XL(settings.cutoff_LPF2_XL, settings.ODR_XL);
 
-  // G LPF1
-  setLPF1_G(settings.cutoff_LPF1_G);
+  // G LPF1 and HPF
+  setLPF1_G(settings.cutoff_LPF1_G, settings.ODR_G);
+  setHPF_G(settings.cutoff_HPF_G);
 
   // BDU
   uint8_t BDU_bit = settings.BDU ? MASK_BDU : 0x00;
@@ -424,7 +440,7 @@ int LSM6DSOXClass::setPowerModeG(PowerModeG power_G)
 int LSM6DSOXClass::setODR_XL(float odr) 
 { 
   // Look up ordinary ODR bit values
-  uint8_t odr_bits = nearestODRbits(odr);
+  uint8_t odr_bits = nearestFloatToBits(odr, ODR_freq_bits);
   // Handle special case of 1.6Hz, which is unique to XL. It needs to be selected
   // if 0 < odr < (halfway 1.6 and 12.5)
   // NOTE that in High Performance mode 12.5Hz will be automatically selected
@@ -437,7 +453,7 @@ int LSM6DSOXClass::setODR_XL(float odr)
 
 int LSM6DSOXClass::setODR_G(float odr) 
 {
-  uint8_t odr_bits = nearestODRbits(odr);
+  uint8_t odr_bits = nearestFloatToBits(odr, ODR_freq_bits);
   return readModifyWriteRegister(LSM6DSOX_CTRL2_G, odr_bits << 4, MASK_ODR_G);
 }
 
@@ -469,10 +485,10 @@ int LSM6DSOXClass::setFullRange_G(float range)
   return result;
 }
 
-int LSM6DSOXClass::setLPF2_XL(float cutoff) 
+int LSM6DSOXClass::setLPF2_XL(float cutoff, float odr) 
 {
   // Cutoff is converted to an ODR divisor. Note that cutoff should be > 0!
-  float odr_divisor = std::round(settings.ODR_XL / cutoff);
+  float odr_divisor = std::round(odr / cutoff);
   // Find the smallest divisor that is larger than or equal to the divisor
   // found above, and extract the corresponding configuration bits.
   uint8_t lpf2_bits = largerOrEqualFloatToBits(odr_divisor, LPF2_XL_bits);
@@ -487,10 +503,10 @@ int LSM6DSOXClass::setLPF2_XL(float cutoff)
   return result;
 }
 
-int LSM6DSOXClass::setLPF1_G(float cutoff) 
+int LSM6DSOXClass::setLPF1_G(float cutoff, float odr) 
 {
   // First, look up ODR bits from G ODR settings
-  uint8_t odr_bits = nearestODRbits(settings.ODR_G);
+  uint8_t odr_bits = nearestFloatToBits(odr, ODR_freq_bits);
   // Find vector of cutoff frequencies and configuration bits corresponding to G ODR
   auto freq_bits_vector = LPF1_G_bits.at(odr_bits);
   // Now find the cutoff that is <= specified cutoff
@@ -502,6 +518,21 @@ int LSM6DSOXClass::setLPF1_G(float cutoff)
     // Bits 1..3 of the bit pattern correspond to FTYPE_[0-2] (CTRL6_C)
     uint8_t ftype = lpf1_bits >> 1;
     result = readModifyWriteRegister(LSM6DSOX_CTRL6_C, ftype, MASK_FTYPE);
+  }
+  return result;
+}
+
+int LSM6DSOXClass::setHPF_G(float cutoff) 
+{
+  // Find closest cutoff frequency and corresponding configuration bits
+  uint8_t hpf_bits = nearestFloatToBits(cutoff, HPF_G_bits);
+  // Bit 0 of the bit pattern corresponds to HP_EN_G (CTRL7_G)
+  uint8_t hp_en_g = hpf_bits & 0x01;
+  int result = readModifyWriteRegister(LSM6DSOX_CTRL7_G, hp_en_g << 6, MASK_HP_EN_G);
+  if(result > 0) {
+    // Bits 1..2 of the bit pattern correspond to MASK_HPM_G_[0-1] (CTRL7_G)
+    uint8_t hpm_g = hpf_bits >> 1;
+    result = readModifyWriteRegister(LSM6DSOX_CTRL7_G, hpm_g << 4, MASK_HPM_G);
   }
   return result;
 }
@@ -694,20 +725,16 @@ int LSM6DSOXClass::readModifyWriteRegister(uint8_t address, uint8_t value, uint8
   return result;
 }
 
-// This is the generic frequency to bits conversion,
-// it does not include the XL LP 1.6Hz exception
-// Find configuration bits for nearest odr value in table.
-uint8_t LSM6DSOXClass::nearestODRbits(float odr) {
+// Find configuration bits for nearest value in table.
+uint8_t LSM6DSOXClass::nearestFloatToBits(float value, const vectorOfFloatsAndBits& v) {
   auto upper_it = std::lower_bound(
-    ODR_freq_bits.begin(),
-    ODR_freq_bits.end()-1,
-    odr,
-    [](const std::pair<float, uint8_t>& p, float value) {return p.first < value;});
-  auto lower_it = upper_it->first <= odr ? upper_it : upper_it-1;
-  uint8_t odr_bits = abs(odr - lower_it->first) <
-                     abs(odr - upper_it->first) ?
-                      lower_it->second : upper_it->second;
-  return odr_bits;
+    v.begin(), v.end()-1, value,
+    [](const std::pair<float, uint8_t>& p, float val) {return p.first < val;});
+  auto lower_it = upper_it->first <= value ? upper_it : upper_it-1;
+  uint8_t bits = abs(value - lower_it->first) <
+                 abs(value - upper_it->first) ?
+                    lower_it->second : upper_it->second;
+  return bits;
 }
 
 // Find lowest full range in table >= specified value

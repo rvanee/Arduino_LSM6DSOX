@@ -48,6 +48,7 @@ public:
   float       fullRange_G;
   float       cutoff_LPF2_XL;
   float       cutoff_LPF1_G;
+  float       cutoff_HPF_G;
   PowerModeXL powerMode_XL;
   PowerModeG  powerMode_G;
   int         i2c_frequency;
@@ -67,6 +68,7 @@ class LSM6DSOXClass {
       float fullRange_G = 2000,
       float cutoff_LPF2_XL = 52,
       float cutoff_LPF1_G = 52,
+      float cutoff_HPF_G = 0,
       PowerModeXL powerMode_XL = XL_POWER_MODE_HP,
       PowerModeG powerMode_G = G_POWER_MODE_HP,
       int i2c_frequency = 100000,
@@ -85,8 +87,9 @@ class LSM6DSOXClass {
     int setFullRange_XL(float range);
     int setFullRange_G(float range);
 
-    int setLPF2_XL(float cutoff);
-    int setLPF1_G(float cutoff);
+    int setLPF2_XL(float cutoff, float odr);
+    int setLPF1_G(float cutoff, float odr);
+    int setHPF_G(float cutoff);
 
     // Accelerometer
     int readAcceleration(float& x, float& y, float& z); // Results are in g (earth gravity).
@@ -117,7 +120,7 @@ class LSM6DSOXClass {
     int writeRegister(uint8_t address, uint8_t value);
     int readModifyWriteRegister(uint8_t address, uint8_t value, uint8_t mask);
 
-    uint8_t nearestODRbits(float odr);
+    uint8_t nearestFloatToBits(float value, const vectorOfFloatsAndBits& v);
     uint8_t largerOrEqualFloatToBits(float value, const vectorOfFloatsAndBits& v);
     uint8_t smallerOrEqualFloatToBits(float value, const vectorOfFloatsAndBits& v);
     float getFloatFromBits(uint8_t bits, const vectorOfFloatsAndBits& v);
