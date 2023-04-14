@@ -20,6 +20,7 @@
 
 unsigned int samplecounter_XL;
 unsigned int samplecounter_G;
+bool do_sample;
 
 String strPowerModeXL[] = {
   "UNDEFINED", "POWER_DOWN", "ULTRA LOW POWER", "LOW POWER/NORMAL", "HIGH PERFORMANCE"
@@ -38,18 +39,20 @@ void setup() {
     while (1);
   }
 
+  do_sample = false;
+
   Scheduler.startLoop(loop_odr);
 }
 
 void loop() {
-  if (IMU.accelerationAvailable()) {
+  if (do_sample && IMU.accelerationAvailable()) {
     float x, y, z;
     IMU.readAcceleration(x, y, z);
 
     samplecounter_XL++;
   }
 
-  if (IMU.gyroscopeAvailable()) {
+  if (do_sample && IMU.gyroscopeAvailable()) {
     float x, y, z;
     IMU.readGyroscope(x, y, z);
 
@@ -77,20 +80,22 @@ void testBlock(PowerModeXL powerXL, PowerModeG powerG, float odr_XL, float odr_G
   Serial.println("Collecting samples for " + String(INTERVAL_MS) + " ms");
   samplecounter_XL = 0;
   samplecounter_G = 0;
+  do_sample = true; // (re)start measuring
   delay(INTERVAL_MS);
+  do_sample = false; // stop measuring
+  delay(10); // Take a bit of time for the measurement loop to stop using I2C
 
   float freq_XL_measured = (1000.0*samplecounter_XL) / INTERVAL_MS;
   float freq_G_measured  = (1000.0*samplecounter_G)  / INTERVAL_MS;
 
   float freq_XL_specified = IMU.accelerationSampleRate();
-  float freq_G_specified = IMU.gyroscopeSampleRate();
-
   Serial.print("XL sample rate = ");
   Serial.print(freq_XL_specified);
   Serial.print("(specified), ");
   Serial.print(freq_XL_measured);
   Serial.println("(measured)");
 
+  float freq_G_specified = IMU.gyroscopeSampleRate();
   Serial.print("G sample rate = ");
   Serial.print(freq_G_specified);
   Serial.print("(specified), ");
@@ -102,14 +107,14 @@ void testBlock(PowerModeXL powerXL, PowerModeG powerG, float odr_XL, float odr_G
 }
 
 void loop_odr() {
-  testBlock(PowerModeXL::XL_POWER_DOWN,           G_POWER_DOWN, 0, 0);
-  testBlock(PowerModeXL::XL_POWER_MODE_LP_NORMAL, PowerModeG::G_POWER_MODE_LP_NORMAL, 1.6, 0);
-  testBlock(PowerModeXL::XL_POWER_MODE_ULP,       PowerModeG::G_POWER_DOWN, 1.6, 0);
-  testBlock(PowerModeXL::XL_POWER_MODE_LP_NORMAL, PowerModeG::G_POWER_MODE_LP_NORMAL, 12.5, 12.5);
-  testBlock(PowerModeXL::XL_POWER_MODE_LP_NORMAL, PowerModeG::G_POWER_MODE_LP_NORMAL, 26, 26);
-  testBlock(PowerModeXL::XL_POWER_MODE_LP_NORMAL, PowerModeG::G_POWER_MODE_LP_NORMAL, 52, 52);
-  testBlock(PowerModeXL::XL_POWER_MODE_LP_NORMAL, PowerModeG::G_POWER_MODE_LP_NORMAL, 104, 104);
-  testBlock(PowerModeXL::XL_POWER_MODE_LP_NORMAL, PowerModeG::G_POWER_MODE_LP_NORMAL, 208, 208);
-  testBlock(PowerModeXL::XL_POWER_MODE_HP,        PowerModeG::G_POWER_MODE_HP, 416, 416);
-  testBlock(PowerModeXL::XL_POWER_MODE_HP,        PowerModeG::G_POWER_MODE_HP, 833, 833);
+  testBlock(XL_POWER_DOWN,           G_POWER_DOWN, 0, 0);
+  testBlock(XL_POWER_MODE_LP_NORMAL, G_POWER_MODE_LP_NORMAL, 1.6, 0);
+  testBlock(XL_POWER_MODE_ULP,       G_POWER_DOWN, 1.6, 0);
+  testBlock(XL_POWER_MODE_LP_NORMAL, G_POWER_MODE_LP_NORMAL, 12.5, 12.5);
+  testBlock(XL_POWER_MODE_LP_NORMAL, G_POWER_MODE_LP_NORMAL, 26, 26);
+  testBlock(XL_POWER_MODE_LP_NORMAL, G_POWER_MODE_LP_NORMAL, 52, 52);
+  testBlock(XL_POWER_MODE_LP_NORMAL, G_POWER_MODE_LP_NORMAL, 104, 104);
+  testBlock(XL_POWER_MODE_LP_NORMAL, G_POWER_MODE_LP_NORMAL, 208, 208);
+  testBlock(XL_POWER_MODE_HP,        G_POWER_MODE_HP, 416, 416);
+  testBlock(XL_POWER_MODE_HP,        G_POWER_MODE_HP, 833, 833);
 }

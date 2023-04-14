@@ -17,12 +17,15 @@
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
+
+#ifndef LSM6DSOX_H
+#define LSM6DSOX_H
+
 #include <Arduino.h>
 #include <Wire.h>
 #include <SPI.h>
 
-#include <vector>
-#include <utility> // For pair
+#include "LSM6DSOXFIFO.h"
 
 enum PowerModeXL {
   XL_POWER_UNDEFINED,
@@ -37,8 +40,6 @@ enum PowerModeG {
   G_POWER_MODE_LP_NORMAL,
   G_POWER_MODE_HP
 };
-
-typedef std::vector<std::pair<float, uint8_t>> vectorOfFloatsAndBits;
 
 struct SensorSettings {
 public:
@@ -57,6 +58,7 @@ public:
 };
 
 class LSM6DSOXClass {
+  friend class LSM6DSOXFIFOClass;
   public:
     LSM6DSOXClass(TwoWire& wire, uint8_t slaveAddress);
     LSM6DSOXClass(SPIClass& spi, int csPin, int irqPin);
@@ -117,6 +119,9 @@ class LSM6DSOXClass {
     //IMU settings
     SensorSettings settings;
 
+    // FIFO
+    LSM6DSOXFIFOClass fifo;
+
     // Actual full range values. These are updated upon each configuration change
     float fullRange_XL;
     float fullRange_G;
@@ -127,10 +132,7 @@ class LSM6DSOXClass {
     int writeRegister(uint8_t address, uint8_t value);
     int readModifyWriteRegister(uint8_t address, uint8_t value, uint8_t mask);
 
-    uint8_t nearestFloatToBits(float value, const vectorOfFloatsAndBits& v);
-    uint8_t largerOrEqualFloatToBits(float value, const vectorOfFloatsAndBits& v);
-    uint8_t smallerOrEqualFloatToBits(float value, const vectorOfFloatsAndBits& v);
-    float getFloatFromBits(uint8_t bits, const vectorOfFloatsAndBits& v);
+    float temperatureIntToCelsius(int temperature_raw);
 
   private:
     TwoWire* _wire;
@@ -147,3 +149,5 @@ class LSM6DSOXClass {
 extern LSM6DSOXClass IMU_LSM6DSOX;
 #undef IMU
 #define IMU IMU_LSM6DSOX
+
+#endif // LSM6DSOX_H
