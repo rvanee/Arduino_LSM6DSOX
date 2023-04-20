@@ -53,6 +53,7 @@ public:
   float     BDR_G;                    // G Batch Data Rate: 0-6667
   float     BDR_temperature;          // Temperature Batch Data Rate: 0/1.6/12.5/52
   uint8_t   timestamp_decimation;     // Timestamp every 0/1/8/32 batch data
+  bool      timestamp_reconstruction; // Reconstruct unbatched timestamps
   
   // Compression
   bool      compression;              // true = enable compression
@@ -123,7 +124,8 @@ class LSM6DSOXFIFOClass {
       float     BDR_G = 104,              // G Batch Data Rate: 0-6667
       float     BDR_temperature = 1.6,    // Temperature Batch Data Rate: 0/1.6/12.5/52
       uint8_t   timestamp_decimation = 1, // Timestamp every 0/1/8/32 batch data
-  
+      bool      timestamp_reconstruction = true, // Reconstruct unbatched timestamps
+
       // Compression
       bool      compression = true,       // true = enable compression
       uint8_t   uncompressed_decimation = 16,// Uncompressed data every 0/8/16/32 batch data
@@ -158,10 +160,18 @@ class LSM6DSOXFIFOClass {
   private:   
     LSM6DSOXClass*  imu;
 
+    // Sample buffer (management)
     Sample          sample[TAGCNT_BUFFER_SIZE]; // Ring buffer, contains the words at T-3, T-2, T-1 and T
-    uint32_t        timestamp_counter;
+    uint32_t        sample_counter;
     uint32_t        to_release_counter;
 
+    // Timestamp (reconstruction)
+    uint64_t        timestamp64;
+    uint64_t        timestamp64_prev;
+    uint32_t        timestamp_counter;
+    float           dt_per_sample;
+
+    // Data buffer (management)
     uint8_t         buffer[BUFFER_WORDS * BUFFER_BYTES_PER_WORD];
     uint16_t        read_idx;
     uint16_t        write_idx;

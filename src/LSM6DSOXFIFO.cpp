@@ -21,6 +21,8 @@
 #include "LSM6DSOX.h"
 #include "LSM6DSOXTables.h"
 
+#include <math.h> // isnan
+
 
 #define LSM6DSOX_ADDRESS            0x6A
 
@@ -90,6 +92,7 @@ void LSM6DSOXFIFOClass::initializeSettings(
   float     BDR_G,                    // G Batch Data Rate: 0-6667
   float     BDR_temperature,          // Temperature Batch Data Rate: 0/1.6/12.5/52
   uint8_t   timestamp_decimation,     // Timestamp every 0/1/8/32 batch data
+  bool      timestamp_reconstruction, // Reconstruct unbatched timestamps
   
   // Compression
   bool      compression,              // true = enable compression
@@ -110,6 +113,7 @@ void LSM6DSOXFIFOClass::initializeSettings(
   settings.BDR_G = BDR_G;
   settings.BDR_temperature = BDR_temperature;
   settings.timestamp_decimation = timestamp_decimation;
+  settings.timestamp_reconstruction = timestamp_reconstruction;
   
   // Compression
   settings.compression = compression;
@@ -189,8 +193,14 @@ void LSM6DSOXFIFOClass::begin()
 
   // Decoder
   compressionEnabled = settings.compression;
-  timestamp_counter = counter_uninitialized;
+  sample_counter = counter_uninitialized;
   to_release_counter = counter_uninitialized;
+
+  // Timestamp (reconstruction)
+  timestamp64 = 0;
+  timestamp64_prev = 0;
+  timestamp_counter = counter_uninitialized;
+  dt_per_sample = NAN;
 
   // Initialize circular tagcnt buffer
   for(uint8_t idx = 0; idx < TAGCNT_BUFFER_SIZE; idx++) {
@@ -356,8 +366,8 @@ SampleStatus LSM6DSOXFIFOClass::inspectWord(uint16_t idx)
 
 int LSM6DSOXFIFOClass::releaseSample(uint16_t idx, Sample& extracted_sample)
 {
-  // Note: this function updates previoustagcnt, timestamp_counter and initializes a new sample
-  // in the circular sample buffer
+  // Note: this function updates previoustagcnt, sample_counter and initializes
+  // a new sample in the circular sample buffer
 
   // Retrieve word from word buffer
   uint8_t *word = buffer_pointer(idx);
@@ -365,25 +375,26 @@ int LSM6DSOXFIFOClass::releaseSample(uint16_t idx, Sample& extracted_sample)
   // Tag counter
   uint8_t tagcnt = (word[FIFO_DATA_OUT_TAG] & MASK_FIFO_TAG_CNT) >> 1;  // T
 
-  // timestamp_counter is undefined at fifo startup.
-  if(timestamp_counter == counter_uninitialized) {
+  // sample_counter is undefined at fifo startup
+  if(sample_counter == counter_uninitialized) {
     // If still uninitialized, initialize it with tagcnt,
     // so the lower 2 bits always resemble tagcnt
-    timestamp_counter = tagcnt;
+    sample_counter = tagcnt;
 
     // The first sample to be released is that of
     // the current timestamp counter
-    to_release_counter = timestamp_counter;
+    to_release_counter = sample_counter;
   }
 
   // Update counter based on tagcnt
-  uint8_t prev_tagcnt = timestamp_counter & 0x03;
+  uint8_t prev_tagcnt = sample_counter & 0x03;
   if(tagcnt != prev_tagcnt) {
+    // TAGCNT rollover?
     if(tagcnt < prev_tagcnt) {
-      timestamp_counter += 4;
+      sample_counter += 4;
     }
-    timestamp_counter &= 0xFFFFFFFC;
-    timestamp_counter |= tagcnt;
+    sample_counter &= 0xFFFFFFFC;
+    sample_counter |= tagcnt;
   }
 
   // If compression is enabled, there should be a delay of
@@ -391,11 +402,27 @@ int LSM6DSOXFIFOClass::releaseSample(uint16_t idx, Sample& extracted_sample)
   // algorithm modifying data at T-2 and T-1, rather than 
   // just at time T.
   uint8_t delta_cnt = compressionEnabled << 1;
-  if((to_release_counter + delta_cnt) < timestamp_counter) {
+  if((to_release_counter + delta_cnt) < sample_counter) {
     uint8_t releasecnt = (uint8_t)(to_release_counter & 0x03);
     extracted_sample = sample[releasecnt];
     initializeSample(releasecnt);
     to_release_counter++;
+
+    // Timestamp reconstruction
+    if(settings.timestamp_reconstruction) {
+      // Reconstruction is only necessary if sample's timestamp undefined...
+      if(isnan(extracted_sample.timestamp) && 
+        // ... and only possible if delta timestamp per sample is known
+         !isnan(dt_per_sample)) {
+        // Calculate number of samples between newest timestamp and this sample
+        int delta_samples = (extracted_sample.counter > timestamp_counter) ?
+          extracted_sample.counter - timestamp_counter :
+          -int(timestamp_counter - extracted_sample.counter);
+        // Set sample's timestamp relative to latest timestamp and correct it
+        extracted_sample.timestamp = 
+          imu->_internalFrequencyFactor * (timestamp64 + delta_samples*dt_per_sample);
+      }
+    }
 
     return 1; // Sample released
   }
@@ -420,7 +447,7 @@ SampleStatus LSM6DSOXFIFOClass::decodeWord(uint16_t idx)
   switch(tag) {
     case 0x01: // Gyroscope NC Main Gyroscope uncompressed data
     {
-      sample[tagcnt].counter = timestamp_counter;
+      sample[tagcnt].counter = sample_counter;
       sample[tagcnt].G_X = bytesToInt16(word[FIFO_DATA_OUT_X_H], word[FIFO_DATA_OUT_X_L]);
       sample[tagcnt].G_Y = bytesToInt16(word[FIFO_DATA_OUT_Y_H], word[FIFO_DATA_OUT_Y_L]);
       sample[tagcnt].G_Z = bytesToInt16(word[FIFO_DATA_OUT_Z_H], word[FIFO_DATA_OUT_Z_L]);
@@ -430,7 +457,8 @@ SampleStatus LSM6DSOXFIFOClass::decodeWord(uint16_t idx)
 
     case 0x02: // Accelerometer NC Main Accelerometer uncompressed data
     {
-      sample[tagcnt].counter = timestamp_counter;
+      sample[tagcnt].counter = sample_counter;
+
       sample[tagcnt].XL_X = bytesToInt16(word[FIFO_DATA_OUT_X_H], word[FIFO_DATA_OUT_X_L]);
       sample[tagcnt].XL_Y = bytesToInt16(word[FIFO_DATA_OUT_Y_H], word[FIFO_DATA_OUT_Y_L]);
       sample[tagcnt].XL_Z = bytesToInt16(word[FIFO_DATA_OUT_Z_H], word[FIFO_DATA_OUT_Z_L]);
@@ -452,7 +480,31 @@ SampleStatus LSM6DSOXFIFOClass::decodeWord(uint16_t idx)
         (((uint32_t)word[FIFO_DATA_OUT_Y_L]) << 16) |
         (((uint32_t)word[FIFO_DATA_OUT_X_H]) <<  8) |
          ((uint32_t)word[FIFO_DATA_OUT_X_L]);
-      sample[tagcnt].timestamp = timestamp * imu->_internalFrequencyFactor;
+      
+      // For timestamp reconstruction:
+      // store old timestamp64 value
+      timestamp64_prev = timestamp64;
+
+      // Test for timestamp overrun, i.e. from large 32-bit value in previous step
+      // to value close to 0
+      if((timestamp64 & 0xFFFFFFFF) > timestamp) {
+        timestamp64 += (1ULL << 32); // Add one to highest 32 bits
+      }
+      // Now replace lower 32 bits of timestamp64 with new 32-bit timestamp value
+      timestamp64 = (timestamp64 & 0xFFFFFFFF00000000) | timestamp;
+
+      // Store (corrected) timestamp in current sample
+      sample[tagcnt].timestamp = timestamp64 * imu->_internalFrequencyFactor;
+
+      // Calculate delta timestamp per sample
+      dt_per_sample = (sample_counter == counter_uninitialized) ||
+                      (timestamp_counter == counter_uninitialized) ?
+                      NAN :
+                      float(timestamp64    - timestamp64_prev) / 
+                           (sample_counter - timestamp_counter);
+
+      // store current sample counter as last timestamp counter
+      timestamp_counter = sample_counter;
       break;
     }
 
@@ -475,7 +527,7 @@ SampleStatus LSM6DSOXFIFOClass::decodeWord(uint16_t idx)
 
     case 0x06: // Accelerometer NC_T_2 Main Accelerometer uncompressed batched at two times the previous time slot
     {
-      sample[tagcnt_2].counter = timestamp_counter-2;
+      sample[tagcnt_2].counter = sample_counter-2;
       sample[tagcnt_2].XL_X = bytesToInt16(word[FIFO_DATA_OUT_X_H], word[FIFO_DATA_OUT_X_L]);
       sample[tagcnt_2].XL_Y = bytesToInt16(word[FIFO_DATA_OUT_Y_H], word[FIFO_DATA_OUT_Y_L]);
       sample[tagcnt_2].XL_Z = bytesToInt16(word[FIFO_DATA_OUT_Z_H], word[FIFO_DATA_OUT_Z_L]);
@@ -485,7 +537,7 @@ SampleStatus LSM6DSOXFIFOClass::decodeWord(uint16_t idx)
 
     case 0x07: // Accelerometer NC_T_1 Main Accelerometer uncompressed data batched at the previous time slot
     {
-      sample[tagcnt_1].counter = timestamp_counter-1;
+      sample[tagcnt_1].counter = sample_counter-1;
       sample[tagcnt_1].XL_X = bytesToInt16(word[FIFO_DATA_OUT_X_H], word[FIFO_DATA_OUT_X_L]);
       sample[tagcnt_1].XL_Y = bytesToInt16(word[FIFO_DATA_OUT_Y_H], word[FIFO_DATA_OUT_Y_L]);
       sample[tagcnt_1].XL_Z = bytesToInt16(word[FIFO_DATA_OUT_Z_H], word[FIFO_DATA_OUT_Z_L]);
@@ -495,8 +547,8 @@ SampleStatus LSM6DSOXFIFOClass::decodeWord(uint16_t idx)
 
     case 0x08: // Accelerometer 2xC Main Accelerometer 2x compressed data
     {
-      sample[tagcnt_2].counter = timestamp_counter-2;
-      sample[tagcnt_1].counter = timestamp_counter-1;
+      sample[tagcnt_2].counter = sample_counter-2;
+      sample[tagcnt_1].counter = sample_counter-1;
       sample[tagcnt_2].XL_X = sample[tagcnt_3].XL_X + signextend<8>(word[FIFO_DATA_OUT_X_L]);
       sample[tagcnt_2].XL_Y = sample[tagcnt_3].XL_Y + signextend<8>(word[FIFO_DATA_OUT_X_H]);
       sample[tagcnt_2].XL_Z = sample[tagcnt_3].XL_Z + signextend<8>(word[FIFO_DATA_OUT_Y_L]);
@@ -510,9 +562,9 @@ SampleStatus LSM6DSOXFIFOClass::decodeWord(uint16_t idx)
 
     case 0x09: // Accelerometer 3xC Main Accelerometer 3x compressed data
     {
-      sample[tagcnt_2].counter = timestamp_counter-2;
-      sample[tagcnt_1].counter = timestamp_counter-1;
-      sample[tagcnt  ].counter = timestamp_counter;
+      sample[tagcnt_2].counter = sample_counter-2;
+      sample[tagcnt_1].counter = sample_counter-1;
+      sample[tagcnt  ].counter = sample_counter;
       sample[tagcnt_2].XL_X = sample[tagcnt_3].XL_X + signextend<5>(word[FIFO_DATA_OUT_X_L] & 0x1F);
       sample[tagcnt_2].XL_Y = sample[tagcnt_3].XL_Y + signextend<5>(((word[FIFO_DATA_OUT_X_H] & 0x03) << 3) | (word[FIFO_DATA_OUT_X_L] >> 5));
       sample[tagcnt_2].XL_Z = sample[tagcnt_3].XL_Z + signextend<5>((word[FIFO_DATA_OUT_X_H] & 0x7C) >> 2);
@@ -530,6 +582,7 @@ SampleStatus LSM6DSOXFIFOClass::decodeWord(uint16_t idx)
 
     case 0x0A: // Gyroscope NC_T_2 Main Gyroscope uncompressed data batched at two times the previous time slot
     {
+      sample[tagcnt_2].counter = sample_counter-2; // Necessary if XL is not recorded in FIFO
       sample[tagcnt_2].G_X = bytesToInt16(word[FIFO_DATA_OUT_X_H], word[FIFO_DATA_OUT_X_L]);
       sample[tagcnt_2].G_Y = bytesToInt16(word[FIFO_DATA_OUT_Y_H], word[FIFO_DATA_OUT_Y_L]);
       sample[tagcnt_2].G_Z = bytesToInt16(word[FIFO_DATA_OUT_Z_H], word[FIFO_DATA_OUT_Z_L]);
@@ -539,6 +592,7 @@ SampleStatus LSM6DSOXFIFOClass::decodeWord(uint16_t idx)
 
     case 0x0B: // Gyroscope NC_T_1 Main Gyroscope uncompressed data batched at the previous time slot
     {
+      sample[tagcnt_1].counter = sample_counter-1; // Necessary if XL is not recorded in FIFO
       sample[tagcnt_1].G_X = bytesToInt16(word[FIFO_DATA_OUT_X_H], word[FIFO_DATA_OUT_X_L]);
       sample[tagcnt_1].G_Y = bytesToInt16(word[FIFO_DATA_OUT_Y_H], word[FIFO_DATA_OUT_Y_L]);
       sample[tagcnt_1].G_Z = bytesToInt16(word[FIFO_DATA_OUT_Z_H], word[FIFO_DATA_OUT_Z_L]);
@@ -548,6 +602,8 @@ SampleStatus LSM6DSOXFIFOClass::decodeWord(uint16_t idx)
 
     case 0x0C: // Gyroscope 2xC Main Gyroscope 2x compressed data
     {
+      sample[tagcnt_2].counter = sample_counter-2; // Necessary if XL is not recorded in FIFO
+      sample[tagcnt_1].counter = sample_counter-1;
       sample[tagcnt_2].G_X = sample[tagcnt_3].G_X + signextend<8>(word[FIFO_DATA_OUT_X_L]);
       sample[tagcnt_2].G_Y = sample[tagcnt_3].G_Y + signextend<8>(word[FIFO_DATA_OUT_X_H]);
       sample[tagcnt_2].G_Z = sample[tagcnt_3].G_Z + signextend<8>(word[FIFO_DATA_OUT_Y_L]);
@@ -561,6 +617,9 @@ SampleStatus LSM6DSOXFIFOClass::decodeWord(uint16_t idx)
 
     case 0x0D: // Gyroscope 3xC Main Gyroscope 3x compressed data
     {
+      sample[tagcnt_2].counter = sample_counter-2; // Necessary if XL is not recorded in FIFO
+      sample[tagcnt_1].counter = sample_counter-1;
+      sample[tagcnt].counter   = sample_counter;
       sample[tagcnt_2].G_X = sample[tagcnt_3].G_X + signextend<5>(word[FIFO_DATA_OUT_X_L] & 0x1F);
       sample[tagcnt_2].G_Y = sample[tagcnt_3].G_Y + signextend<5>(((word[FIFO_DATA_OUT_X_H] & 0x03) << 3) | (word[FIFO_DATA_OUT_X_L] >> 5));
       sample[tagcnt_2].G_Z = sample[tagcnt_3].G_Z + signextend<5>((word[FIFO_DATA_OUT_X_H] & 0x7C) >> 2);
