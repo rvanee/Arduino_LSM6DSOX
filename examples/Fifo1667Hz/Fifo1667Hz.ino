@@ -29,9 +29,20 @@ int execution_time_N;
 double T_sum;
 int T_N;
 
+double XL_sum[3];
+double XL_squared_sum[3];
+int XL_N;
+double G_sum[3];
+double G_squared_sum[3];
+int G_N;
+
+
 #define REPORT_INTERVAL       5000
 #define ODR_ALL               1667
 
+double stddev(double squared_sum, double sum, unsigned long int n) {
+  return sqrt((squared_sum - (sum*sum/n))/(n-1));
+}
 
 void setup() {
   Serial.begin(115200);
@@ -40,9 +51,11 @@ void setup() {
 
   IMU.settings.i2c_frequency = 400000;
   IMU.settings.powerMode_XL = XL_POWER_MODE_HP;
-  IMU.settings.ODR_XL = ODR_ALL;
+  IMU.settings.ODR_XL = ODR_ALL;//6667;
+  //IMU.settings.cutoff_LPF2_XL = 800;
   IMU.settings.powerMode_G = G_POWER_MODE_HP;
-  IMU.settings.ODR_G = ODR_ALL;
+  IMU.settings.ODR_G = ODR_ALL;//6667;
+  //IMU.settings.cutoff_LPF1_G = 609;
   if (!IMU.begin()) {
     Serial.println("Failed to initialize IMU!");
 
@@ -55,8 +68,8 @@ void setup() {
   IMU.resetTimestamp();
 
   IMU.fifo.settings.compression = true;
-  IMU.fifo.settings.BDR_XL = ODR_ALL;
-  IMU.fifo.settings.BDR_G = ODR_ALL;
+  IMU.fifo.settings.BDR_XL = ODR_ALL;//1667;
+  IMU.fifo.settings.BDR_G = ODR_ALL;//1667;
   IMU.fifo.settings.timestamp_decimation = 8;
   IMU.fifo.settings.BDR_temperature = 52;
   IMU.fifo.begin();
@@ -82,6 +95,22 @@ void setup() {
 
   T_sum = 0.0;
   T_N = 0;
+
+  XL_sum[0] = 0.0;
+  XL_sum[1] = 0.0;
+  XL_sum[2] = 0.0;
+  XL_squared_sum[0] = 0.0;
+  XL_squared_sum[1] = 0.0;
+  XL_squared_sum[2] = 0.0;
+  XL_N = 0;
+
+  G_sum[0] = 0.0;
+  G_sum[1] = 0.0;
+  G_sum[2] = 0.0;
+  G_squared_sum[0] = 0.0;
+  G_squared_sum[1] = 0.0;
+  G_squared_sum[2] = 0.0;
+  G_N = 0;
 }
 
 void loop() {
@@ -117,11 +146,24 @@ void loop() {
         T_N++;
       }
 
-      /*
-      Serial.println("sample retrieved: counter="+String(sample.counter)+" t="+String(sample.timestamp)+" T="+String(sample.temperature)+
-        " XL="+String(sample.XL_X)+","+String(sample.XL_Y)+","+String(sample.XL_Z)+"(FS "+String(sample.XL_fullScale)+")"+
-        " G="+String(sample.G_X)+","+String(sample.G_Y)+","+String(sample.G_Z)+"(FS "+String(sample.G_fullScale)+")");
-        */
+      // Update sum of XL X/Y/Z (squared)
+      if(!isnan(sample.XL.XYZ[0])) {
+        for(int ixl=0; ixl<3; ixl++) { // Iterate through X/Y/Z
+          double XL_XYZ = sample.XL.XYZ[ixl];
+          XL_sum[ixl] += XL_XYZ;
+          XL_squared_sum[ixl] += XL_XYZ*XL_XYZ;
+        }
+        XL_N++;
+      }
+      // Update sum of G X/Y/Z (squared)
+      if(!isnan(sample.G.XYZ[0])) {
+        for(int ig=0; ig<3; ig++) { // Iterate through X/Y/Z
+          double G_XYZ = sample.G.XYZ[ig];
+          G_sum[ig] += G_XYZ;
+          G_squared_sum[ig] += G_XYZ*G_XYZ;
+        }
+        G_N++;
+      }
       break;
     case SampleStatus::BUFFER_UNDERRUN:
       // No sample available: we're too fast, need to wait (or perform something useful)
@@ -163,6 +205,8 @@ void loop() {
   int deltat = currenttime - lasttime;
   if(deltat > REPORT_INTERVAL) {
     lasttime = currenttime;
+
+    // Display timing information + bookkeeping
     double frequency = (double)execution_time_N / (0.001*deltat);
     Serial.println("Sample frequency = " + String(execution_time_N) + 
                    " / "+String(0.001*deltat)+"s = "+String(frequency)+"/s");
@@ -178,10 +222,31 @@ void loop() {
     execution_time_sum = 0;
     execution_time_N = 0;
 
-    Serial.println("Tavg = "+String(T_sum / T_N)+" degC ("+String(T_N)+" samples)");
-    Serial.println("---");
-
+    // Display temperature information + bookkeeping
+     Serial.println("Tavg = "+String(T_sum / T_N)+" degC ("+String(T_N)+" samples)");
     T_sum = 0.0;
     T_N = 0;
+
+    // Display XL stddev information + bookkeeping
+     for(int ixl=0; ixl < 3; ixl++) {
+      double XL_std_mg = 1000*stddev(XL_squared_sum[ixl], XL_sum[ixl], XL_N);
+      char xyz = 'X' + ixl;
+      Serial.println("XL_std "+String(xyz)+" = "+String(XL_std_mg)+" mg");
+      XL_sum[ixl] = 0.0;
+      XL_squared_sum[ixl] = 0.0;
+    }
+    XL_N = 0;
+
+    // Display G stddev information + bookkeeping
+     for(int ig=0; ig < 3; ig++) {
+      double G_std_mdegs = 1000*stddev(G_squared_sum[ig], G_sum[ig], G_N);
+      char xyz = 'X' + ig;
+      Serial.println("G_std "+String(xyz)+" = "+String(G_std_mdegs)+" mdeg/s");
+      G_sum[ig] = 0.0;
+      G_squared_sum[ig] = 0.0;
+    }
+    G_N = 0;
+
+    Serial.println("---");
   }
 }

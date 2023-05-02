@@ -81,18 +81,18 @@ public:
   uint16_t DIFF_FIFO;   // Number of unread sensor data words (TAG + 6 bytes) stored in FIFO
 };
 
+struct SampleData {
+  float XYZ[3];
+  int16_t rawXYZ[3];
+  uint16_t fullRange;
+};
+
 struct Sample {
-  int16_t G_X;
-  int16_t G_Y;
-  int16_t G_Z;
-  int16_t XL_X;
-  int16_t XL_Y;
-  int16_t XL_Z;
+  SampleData G;
+  SampleData XL;
   double timestamp;     // May be NaN
   float temperature;    // May be NaN
   uint32_t counter;     // Lowest 2 bits provided by tag byte (TAG_CNT)
-  uint8_t fullRange_XL;
-  uint16_t fullRange_G;
 };
 
 // Utility: sign extension from B bits in 2's complement to int16 
@@ -151,10 +151,13 @@ class LSM6DSOXFIFOClass {
     int             readData(uint16_t& words_read, bool& too_full, FIFOStatus& status);
     int             releaseSample(uint16_t idx, Sample& extracted_sample);
     SampleStatus    decodeWord(uint16_t idx);
-
+    
+    void            extend5bits(uint8_t hi, uint8_t lo, int16_t &delta_x, int16_t &delta_y, int16_t &delta_z);
     inline uint8_t* buffer_pointer(uint16_t idx) {
       return &buffer[idx * BUFFER_BYTES_PER_WORD];
     }
+
+    void            setSampleData(SampleData &s, int16_t X, int16_t Y, int16_t Z, uint16_t fullRange);
     void            initializeSample(uint8_t idx);
 
   private:   
