@@ -22,11 +22,17 @@
 
 #include <Arduino.h>
 #include <limits>
+#include <eventqueue.h>
 
-// Buffer size. Define extra slots for compression, timestamp and config change
-#define BUFFER_WORDS          512  // Number of 'words'
-#define BUFFER_BYTES_PER_WORD 7    // Tag + 3 * (2 byte word)
-#define TAGCNT_BUFFER_SIZE    4    // 4 possible TAGCNT values (0-3)
+// I2C buffer size is limited to 32 bytes, see link below.
+// https://reference.arduino.cc/reference/en/language/functions/communication/wire/
+#define I2C_BUFFER_LENGTH           32
+#define READ_MAX_WORDS              (I2C_BUFFER_LENGTH / BUFFER_BYTES_PER_WORD)
+
+// Packet buffer size. Define extra slots for compression, timestamp and config change
+#define BUFFER_WORDS          READ_MAX_WORDS  // Number of 'words'
+#define BUFFER_BYTES_PER_WORD 7               // Tag + 3 * (2 byte word)
+#define TAGCNT_BUFFER_SIZE    4               // 4 possible TAGCNT values (0-3)
 
 #define FIFO_DATA_OUT_TAG     0
 #define FIFO_DATA_OUT_X_L     1
@@ -36,14 +42,23 @@
 #define FIFO_DATA_OUT_Z_L     5
 #define FIFO_DATA_OUT_Z_H     6
 
-enum class SampleStatus { 
+// Sample buffer size. It should be larger for higher sample rates and for longer
+// delays between sample collection and processing.
+#define SAMPLE_BUFFER_SIZE    32
+
+enum class ReadResult {
+  NO_DATA_AVAILABLE,
+  DATA_READ,
+  READ_ERROR,
+  FIFO_OVERFLOW,
+  QUEUE_FULL,
+  LOGIC_ERROR
+};
+
+enum class DecodeTagResult {
   OK,
-  BUFFER_UNDERRUN,
-  BUFFER_OVERRUN,
   TAG_NOT_IMPLEMENTED,
   UNKNOWN_TAG,
-  PARITY_ERROR,
-  COMMUNICATION_ERROR
 };
 
 struct FIFOSettings {
@@ -85,6 +100,7 @@ struct SampleData {
   float XYZ[3];
   int16_t rawXYZ[3];
   uint16_t fullRange;
+  bool valid;
 };
 
 struct Sample {
@@ -106,14 +122,14 @@ inline int16_t signextend(const uint8_t x)
 // Utility: convert 2 bytes to (signed) int16
 inline int16_t bytesToInt16(uint8_t hi, uint8_t lo)
 { 
-   return ((int16_t)hi << 8) + lo;
+  return ((int16_t)hi << 8) + lo;
 }
 
 class LSM6DSOXClass;
 
 class LSM6DSOXFIFOClass {
   public:
-    FIFOSettings  settings;
+    FIFOSettings settings;
 
     LSM6DSOXFIFOClass(LSM6DSOXClass* imu);
     ~LSM6DSOXFIFOClass();
@@ -144,24 +160,28 @@ class LSM6DSOXFIFOClass {
     void            end();
 
     int             readStatus(FIFOStatus& status);
-    SampleStatus    getSample(Sample& sample);
+    ReadResult      fillQueue();
+
+    bool            retrieveSample(Sample& sample) {
+      return sampleQueue.getQ(sample);
+    }
 
   private:   
-    SampleStatus    inspectWord(uint16_t idx);
-    int             readData(uint16_t& words_read, bool& too_full, FIFOStatus& status);
-    int             releaseSample(uint16_t idx, Sample& extracted_sample);
-    SampleStatus    decodeWord(uint16_t idx);
-    
+    int             releaseSample(uint8_t tagcnt, Sample& extracted_sample);
+    DecodeTagResult decodeWord(uint8_t *word);
+  
     void            extend5bits(uint8_t hi, uint8_t lo, int16_t &delta_x, int16_t &delta_y, int16_t &delta_z);
     inline uint8_t* buffer_pointer(uint16_t idx) {
       return &buffer[idx * BUFFER_BYTES_PER_WORD];
     }
 
-    void            setSampleData(SampleData &s, int16_t X, int16_t Y, int16_t Z, uint16_t fullRange);
-    void            initializeSample(uint8_t idx);
+    void            setSampleData(SampleData &s, int16_t X, int16_t Y, int16_t Z, uint16_t fullRange, bool valid);
+    void            initializeSample(uint8_t idx, bool setStatusInvalid = false);
+    void            invalidateSample(uint8_t idx);
 
   private:   
     LSM6DSOXClass*  imu;
+    EventQueue<Sample, SAMPLE_BUFFER_SIZE> sampleQueue;
 
     // Sample buffer (management)
     Sample          sample[TAGCNT_BUFFER_SIZE]; // Ring buffer, contains the words at T-3, T-2, T-1 and T

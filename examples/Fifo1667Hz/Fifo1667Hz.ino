@@ -21,6 +21,9 @@ int lasttime;
 
 uint32_t prev_counter;
 
+unsigned long XL_invalid;
+unsigned long G_invalid;
+
 unsigned long execution_time_min;
 unsigned long execution_time_max;
 unsigned long execution_time_sum;
@@ -38,7 +41,7 @@ int G_N;
 
 
 #define REPORT_INTERVAL       5000
-#define ODR_ALL               1667
+#define ODR_ALL               208
 
 double stddev(double squared_sum, double sum, unsigned long int n) {
   return sqrt((squared_sum - (sum*sum/n))/(n-1));
@@ -88,6 +91,9 @@ void setup() {
 
   prev_counter = IMU.fifo.counter_uninitialized;
 
+  XL_invalid = 0;
+  G_invalid = 0;
+
   execution_time_min = std::numeric_limits<unsigned long>::max();
   execution_time_max = 0;
   execution_time_sum = 0;
@@ -114,91 +120,89 @@ void setup() {
 }
 
 void loop() {
-  Sample sample;
   unsigned long us_before = micros();
-  SampleStatus sampleResult = IMU.fifo.getSample(sample);
+  ReadResult readResult = IMU.fifo.fillQueue();
   unsigned long execution_time = micros() - us_before;
 
   bool errorOccurred = false;
-  switch(sampleResult) {
-    // Good results
-    case SampleStatus::OK: // Sample successfully retrieved
-      // Check if current counter equals previous counter+1
-      // (basic sanity check)
-      if(prev_counter != IMU.fifo.counter_uninitialized) {
-        if(sample.counter != (prev_counter+1))
-        {
-          Serial.print("Counter error");
-          errorOccurred = true;
-          break;
-        }
-      }
-      prev_counter = sample.counter;     
-
-      if(execution_time_min > execution_time) execution_time_min = execution_time;
-      if(execution_time_max < execution_time) execution_time_max = execution_time;
-      execution_time_sum += execution_time;
-      execution_time_N++;
-
-      // In some samples T is defined (not isnan)
-      if(!isnan(sample.temperature)) {
-        T_sum += sample.temperature;
-        T_N++;
-      }
-
-      // Update sum of XL X/Y/Z (squared)
-      if(!isnan(sample.XL.XYZ[0])) {
-        for(int ixl=0; ixl<3; ixl++) { // Iterate through X/Y/Z
-          double XL_XYZ = sample.XL.XYZ[ixl];
-          XL_sum[ixl] += XL_XYZ;
-          XL_squared_sum[ixl] += XL_XYZ*XL_XYZ;
-        }
-        XL_N++;
-      }
-      // Update sum of G X/Y/Z (squared)
-      if(!isnan(sample.G.XYZ[0])) {
-        for(int ig=0; ig<3; ig++) { // Iterate through X/Y/Z
-          double G_XYZ = sample.G.XYZ[ig];
-          G_sum[ig] += G_XYZ;
-          G_squared_sum[ig] += G_XYZ*G_XYZ;
-        }
-        G_N++;
-      }
+  switch(readResult) {
+    case ReadResult::DATA_READ:
       break;
-    case SampleStatus::BUFFER_UNDERRUN:
-      // No sample available: we're too fast, need to wait (or perform something useful)
+    case ReadResult::NO_DATA_AVAILABLE:
+      // No sample available: we're too fast, need to wait (or do something useful)
       delay(1);
       break;
-
-    // Bad results (various errors)
-    case SampleStatus::COMMUNICATION_ERROR:
-      Serial.print("Communication error");
-      errorOccurred = true;
-      break;
-    case SampleStatus::PARITY_ERROR:
-      Serial.print("Tag parity error");
-      errorOccurred = true;
-      break;
-    case SampleStatus::TAG_NOT_IMPLEMENTED:
-      Serial.print("Tag not implemented error");
-      errorOccurred = true;
-      break;
-    case SampleStatus::UNKNOWN_TAG:
-      Serial.print("Unknown tag error");
-      errorOccurred = true;
-      break;
-    case SampleStatus::BUFFER_OVERRUN:
-      // We're too slow
+    case ReadResult::QUEUE_FULL:
+      // We're too slow in sample extraction from the queue...
       Serial.print("Buffer overrun error");
       errorOccurred = true;
       break;
-    default:
+    case ReadResult::FIFO_OVERFLOW:
+      // We're too slow in reading words from the IMU...
+      Serial.print("IMU FIFO overrun error");
+      errorOccurred = true;
       break;
+    case ReadResult::READ_ERROR:
+      Serial.print("Communication error");
+      errorOccurred = true;
+      break;
+    case ReadResult::LOGIC_ERROR:
+    default:
+      Serial.print("Software logic error, this shouldn't happen");
+      errorOccurred = true;
   }
   if(errorOccurred) {
     Serial.println(" while reading from IMU!");
     while (1);
   }
+
+  Sample sample;
+  if(IMU.fifo.retrieveSample(sample)) {
+    if(prev_counter != IMU.fifo.counter_uninitialized) {
+      if(sample.counter != (prev_counter+1))
+      {
+        Serial.println("Counter error while reading from IMU!");
+        // Go on, this may happen when problems occur with
+        // the tag byte during decode
+      }
+    }
+    prev_counter = sample.counter;
+
+    // Invalid samples
+    XL_invalid += !sample.XL.valid;
+    G_invalid  += !sample.G.valid;
+
+    // Execution time statistics
+    if(execution_time_min > execution_time) execution_time_min = execution_time;
+    if(execution_time_max < execution_time) execution_time_max = execution_time;
+    execution_time_sum += execution_time;
+    execution_time_N++;
+
+    // In some samples T is defined (not isnan)
+    if(!isnan(sample.temperature)) {
+      T_sum += sample.temperature;
+      T_N++;
+    }
+
+    // Update sum of XL X/Y/Z (squared)
+    if(!isnan(sample.XL.XYZ[0])) {
+      for(int ixl=0; ixl<3; ixl++) { // Iterate through X/Y/Z
+        double XL_XYZ = sample.XL.XYZ[ixl];
+        XL_sum[ixl] += XL_XYZ;
+        XL_squared_sum[ixl] += XL_XYZ*XL_XYZ;
+      }
+      XL_N++;
+    }
+    // Update sum of G X/Y/Z (squared)
+    if(!isnan(sample.G.XYZ[0])) {
+      for(int ig=0; ig<3; ig++) { // Iterate through X/Y/Z
+        double G_XYZ = sample.G.XYZ[ig];
+        G_sum[ig] += G_XYZ;
+        G_squared_sum[ig] += G_XYZ*G_XYZ;
+      }
+      G_N++;
+    }
+  } // END if(retrieveSample(sample))
 
   // Reporting
   int currenttime = millis();
@@ -222,13 +226,19 @@ void loop() {
     execution_time_sum = 0;
     execution_time_N = 0;
 
+    // Invalid XL/G measurements
+    Serial.println("# invalid XL samples = "+String(XL_invalid));
+    Serial.println("# invalid G  samples = "+String(G_invalid));
+    XL_invalid = 0;
+    G_invalid = 0;
+
     // Display temperature information + bookkeeping
-     Serial.println("Tavg = "+String(T_sum / T_N)+" degC ("+String(T_N)+" samples)");
+    Serial.println("Tavg = "+String(T_sum / T_N)+" degC ("+String(T_N)+" samples)");
     T_sum = 0.0;
     T_N = 0;
 
     // Display XL stddev information + bookkeeping
-     for(int ixl=0; ixl < 3; ixl++) {
+    for(int ixl=0; ixl < 3; ixl++) {
       double XL_std_mg = 1000*stddev(XL_squared_sum[ixl], XL_sum[ixl], XL_N);
       char xyz = 'X' + ixl;
       Serial.println("XL_std "+String(xyz)+" = "+String(XL_std_mg)+" mg");
@@ -238,7 +248,7 @@ void loop() {
     XL_N = 0;
 
     // Display G stddev information + bookkeeping
-     for(int ig=0; ig < 3; ig++) {
+    for(int ig=0; ig < 3; ig++) {
       double G_std_mdegs = 1000*stddev(G_squared_sum[ig], G_sum[ig], G_N);
       char xyz = 'X' + ig;
       Serial.println("G_std "+String(xyz)+" = "+String(G_std_mdegs)+" mdeg/s");
@@ -248,5 +258,5 @@ void loop() {
     G_N = 0;
 
     Serial.println("---");
-  }
-}
+  } // END if(deltat > REPORT_INTERVAL)
+} // END void loop()

@@ -43,11 +43,6 @@
 #define LSM6DSOX_EMB_FUNC_EN_B      0x05
 //#define LSM6DSOX_EMB_FUNC_PAGE_RW   0x17
 
-// I2C buffer size is limited to 32 bytes, see link below.
-// https://reference.arduino.cc/reference/en/language/functions/communication/wire/
-#define I2C_BUFFER_LENGTH           32
-#define READ_MAX_WORDS              (I2C_BUFFER_LENGTH / BUFFER_BYTES_PER_WORD)
-
 // Bit masks
 #define MASK_FUNC_CFG_ACCESS        0x80  // FUNC_CFG_ACCESS
 #define MASK_FIFO_COMPR_EN          0x08  // EMB_FUNC_EN_B
@@ -207,9 +202,9 @@ void LSM6DSOXFIFOClass::begin()
   timestamp_counter = counter_uninitialized;
   dt_per_sample = NAN;
 
-  // Initialize circular tagcnt buffer
+  // Initialize circular tagcnt buffer. Set G and XL data to invalid
   for(uint8_t idx = 0; idx < TAGCNT_BUFFER_SIZE; idx++) {
-    initializeSample(idx);
+    initializeSample(idx, true);
   } 
 }
 
@@ -239,146 +234,105 @@ int LSM6DSOXFIFOClass::readStatus(FIFOStatus& status)
   return result;
 }
 
-// Read as much data as possible in one multiple byte/word read from sensor fifo
-// to our own buffer
-int LSM6DSOXFIFOClass::readData(uint16_t& words_read, bool& too_full, FIFOStatus& status)
+ReadResult LSM6DSOXFIFOClass::fillQueue()
 {
-  words_read = 0;
-  too_full = false;
-
+  FIFOStatus status;
   int result = readStatus(status);
-  if(result == 1) {
-    // The I2C/SPI multibyte read requires contiguous memory. Therefore fifo reading 
-    // operations can not run past the end of the buffer. They can also not run
-    // up to the current read pointer, in order to prevent data overrun.
-    uint16_t to_read = status.DIFF_FIFO;
-    if(read_idx > write_idx) {
-      uint16_t readable = read_idx - write_idx;
-      if(to_read > readable) {
-        to_read = readable;
-        too_full = true;
-      }
-    // Check special case where read and write pointer coincide: the buffer
-    // is either empty or completely full
-    } else if((read_idx == write_idx) && !buffer_empty) {
-        to_read = 0;
-        too_full = true;
-    } else { // Now read_idx < write_idx, so we can write up all the way to buffer end
-      uint16_t to_end = BUFFER_WORDS - write_idx;
-      if(to_read > to_end) to_read = to_end;
-    }
-    if(to_read == 0) return 2; // No data read, but other reason than communication problem (<= 0)
+  if(result != 1) return ReadResult::READ_ERROR;
 
+  // Check if new data available
+  uint16_t to_read = status.DIFF_FIFO;
+  if(to_read == 0) {
+    return ReadResult::NO_DATA_AVAILABLE;
+  }
+
+  // Check for FIFO overflow
+  if(status.FIFO_OVR_IA) {
+    return ReadResult::FIFO_OVERFLOW;
+  }
+
+  // Read data from FIFO to buffer
+  while(to_read > 0) {
     // Break down read operations into a maximum number of words
-    while(to_read > 0) {
-      uint16_t read_now = min(to_read, READ_MAX_WORDS);
+    uint16_t read_now = min(to_read, READ_MAX_WORDS);
 
-      result = imu->readRegisters(LSM6DSOX_FIFO_DATA_OUT_TAG, buffer_pointer(write_idx), read_now*BUFFER_BYTES_PER_WORD);
-      if(result != 1) return result;
+    result = imu->readRegisters(LSM6DSOX_FIFO_DATA_OUT_TAG, buffer, read_now*BUFFER_BYTES_PER_WORD);
+    if(result != 1) return ReadResult::READ_ERROR;
 
-      words_read += read_now;
-      to_read -= read_now;
-      if((write_idx += read_now) >= BUFFER_WORDS) write_idx -= BUFFER_WORDS; // Wrap around to buffer start
-      buffer_empty = false;
-    } // END while(to_read > 0)
-  }
-  return result;
-}
+    // Process read words
+    for(uint16_t wordidx = 0; wordidx < read_now; wordidx++) {
+      uint8_t *word = buffer_pointer(wordidx);
+      uint8_t tag_byte = word[FIFO_DATA_OUT_TAG];
 
-SampleStatus LSM6DSOXFIFOClass::getSample(Sample& sample)
-{
-  // First process words in the local buffer, return as soon as a sample
-  // can be released (lazy approach).
-  // If the local buffer runs empty, fill it from the fifo, then
-  // again decode words until a sample may be released.
-  uint16_t words_read = 0;
-  do {
-    // Process all words available in the local buffer,
-    // until a sample is produced or no more words are
-    // available in the local buffer.
-    while(!buffer_empty) {
-      // Inspect word at read idx pointer
-      SampleStatus inspectStatus = inspectWord(read_idx);
-      switch(inspectStatus) {
-        case SampleStatus::OK:
-          // Nothing wrong, continue below
+      // Perform parity check
+      uint8_t parity = tag_byte ^ (tag_byte >> 4);
+      parity ^= (parity >> 2);
+      parity ^= (parity >> 1);
+      if(parity & MASK_FIFO_TAG_PARITY) {
+        // This is a serious error, probably related to communication with
+        // the IMU. Since the tag byte contains TAGCNT as well as TAG data,
+        // we don't know if TAGCNT has increased, and if XL or G data is
+        // involved.
+        // If no compression is enabled, sample data for TAGCNT+0/1 should
+        // be invalidated. If compression is enabled, sample data for
+        // TAGCNT-1/2 should also be invalidated.
+        invalidateSample(0);
+        invalidateSample(1);
+        if(compressionEnabled) {
+          invalidateSample(3); // -1 MOD 4 = 3
+          invalidateSample(2); // -2 MOD 4 = 2
+        }
+        // This word can't be evaluated any further, but we can go on 
+        // decoding the next words
+        continue;
+      }
+
+      // Check if a sample can be released.
+      // Also manages counters and timestamps
+      uint8_t tagcnt = (tag_byte & MASK_FIFO_TAG_CNT) >> 1;
+      Sample extracted_sample;
+      if(releaseSample(tagcnt, extracted_sample)) {
+        // Store sample in queue
+        if (!sampleQueue.putQ(extracted_sample)) {
+          return ReadResult::QUEUE_FULL;
+        }
+      }
+
+      // Decode word, writes to small circular sample buffer
+      DecodeTagResult decodeResult = decodeWord(word);
+      switch(decodeResult) {
+        case DecodeTagResult::OK:
+          // All fine
+        case DecodeTagResult::TAG_NOT_IMPLEMENTED:
+          // Not a problem, this tag doesn't hurt our purpose of
+          // decoding samples
           break;
-
-        case SampleStatus::PARITY_ERROR: // Parity error -> communication problem?
-        default:
-          return inspectStatus;
-      }
-
-      // Extract sample if available
-      int samples_released = releaseSample(read_idx, sample);
-      if(samples_released > 0) {
-        // Ready: sample released, no errors
-        return SampleStatus::OK;
-      }
-      
-      // Decode word, then update read pointer and buffer empty flag
-      SampleStatus decodeStatus = decodeWord(read_idx);
-      if(++read_idx >= BUFFER_WORDS) read_idx -= BUFFER_WORDS;
-      buffer_empty = (read_idx == write_idx);
-      switch(decodeStatus) {
-        case SampleStatus::OK:
-          // Continue below, i.e. enter next !buffer_empty loop iteration
+        case DecodeTagResult::UNKNOWN_TAG:
+          // This may be a serious problem, arising from a
+          // communication error. Or it may indicate using
+          // this code on a later version of the IMU, that
+          // may or may not be backwards compatible.
+          // Mitigation is in decodeWord(), where sample 
+          // data is invalidated for both XL and G data.
           break;
-
-        case SampleStatus::TAG_NOT_IMPLEMENTED:
-        case SampleStatus::UNKNOWN_TAG:
         default:
-          return decodeStatus;
-      }
-    } // END while(!buffer_empty)
+          // We really should not be here, so this is an
+          // error in the code logic that we can't
+          // recover from
+          return ReadResult::LOGIC_ERROR;
+      } 
+    } // END for(uint16_t wordidx = 0...
 
-    // If no sample was produced, read a fresh batch of
-    // words from the IMU to the local buffer. Then resume
-    // processing them, again until a sample is produced.
-    bool too_full = false;
-    // Read block of data. Note that too_full will always be false,
-    // since the buffer was emptied above.
-    FIFOStatus status;
-    int read_result = readData(words_read, too_full, status);
-    // If an error occurred (result <= 0), report communication error
-    if(read_result <= 0) {
-      return SampleStatus::COMMUNICATION_ERROR;
-    }
-    // Buffer overrun qualifies as an error too
-    if(status.FIFO_OVR_LATCHED) {
-      return SampleStatus::BUFFER_OVERRUN;
-    }
-  } while (words_read > 0);
+    to_read -= read_now;
+  } // END while(to_read > 0)
 
-  // No words were read (so fifo is empty, 'underrun')
-  return SampleStatus::BUFFER_UNDERRUN;
+  return ReadResult::DATA_READ;
 }
 
-SampleStatus LSM6DSOXFIFOClass::inspectWord(uint16_t idx)
-{
-  uint8_t *word = buffer_pointer(idx);
-  
-  // Perform parity check
-  uint8_t parity = word[FIFO_DATA_OUT_TAG] ^ (word[FIFO_DATA_OUT_TAG] >> 4);
-  parity ^= (parity >> 2);
-  parity ^= (parity >> 1);
-  if(parity & MASK_FIFO_TAG_PARITY) {
-    return SampleStatus::PARITY_ERROR; // Parity error -> communication problem?
-  }
-
-  return SampleStatus::OK;
-}
-
-int LSM6DSOXFIFOClass::releaseSample(uint16_t idx, Sample& extracted_sample)
+int LSM6DSOXFIFOClass::releaseSample(uint8_t tagcnt, Sample& extracted_sample)
 {
   // Note: this function updates previoustagcnt, sample_counter and initializes
   // a new sample in the circular sample buffer
-
-  // Retrieve word from word buffer
-  uint8_t *word = buffer_pointer(idx);
-
-  // Tag counter
-  uint8_t tagcnt = (word[FIFO_DATA_OUT_TAG] & MASK_FIFO_TAG_CNT) >> 1;  // T
 
   // sample_counter is undefined at fifo startup
   if(sample_counter == counter_uninitialized) {
@@ -432,23 +386,23 @@ int LSM6DSOXFIFOClass::releaseSample(uint16_t idx, Sample& extracted_sample)
     return 1; // Sample released
   }
 
-  return 0; // No sample released, keep decoding
+  return 0; // No sample released
 }
 
-SampleStatus LSM6DSOXFIFOClass::decodeWord(uint16_t idx)
+DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
 {
   // Note: this function updates fullRange_G, fullRange_XL and compressionEnabled,
   // as well as the sample circular buffer
-  uint8_t *word = buffer_pointer(idx);
-
+  
   // Tag counters
-  uint8_t tagcnt = (word[FIFO_DATA_OUT_TAG] & MASK_FIFO_TAG_CNT) >> 1;  // T
-  uint8_t tagcnt_1 = (tagcnt-1) & 0x03; // T-1
-  uint8_t tagcnt_2 = (tagcnt-2) & 0x03; // T-2
-  uint8_t tagcnt_3 = (tagcnt-3) & 0x03; // T-3
+  uint8_t tag_byte = word[FIFO_DATA_OUT_TAG];
+  uint8_t tagcnt = (tag_byte & MASK_FIFO_TAG_CNT) >> 1;  // T
+  uint8_t tagcnt_1 = (tagcnt-1) & 0x03; // T-1 mod 4
+  uint8_t tagcnt_2 = (tagcnt-2) & 0x03; // T-2 mod 4
+  uint8_t tagcnt_3 = (tagcnt-3) & 0x03; // T-3 mod 4
 
   // Decode tag
-  uint8_t tag = word[FIFO_DATA_OUT_TAG] >> 3;
+  uint8_t tag = tag_byte >> 3;
   switch(tag) {
     case 0x01: // Gyroscope NC Main Gyroscope uncompressed data
     {
@@ -456,7 +410,7 @@ SampleStatus LSM6DSOXFIFOClass::decodeWord(uint16_t idx)
                     bytesToInt16(word[FIFO_DATA_OUT_X_H], word[FIFO_DATA_OUT_X_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Y_H], word[FIFO_DATA_OUT_Y_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Z_H], word[FIFO_DATA_OUT_Z_L]),
-                    imu->fullRange_G);
+                    imu->fullRange_G, true);
       sample[tagcnt].counter = sample_counter;
       break;
     }
@@ -467,7 +421,7 @@ SampleStatus LSM6DSOXFIFOClass::decodeWord(uint16_t idx)
                     bytesToInt16(word[FIFO_DATA_OUT_X_H], word[FIFO_DATA_OUT_X_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Y_H], word[FIFO_DATA_OUT_Y_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Z_H], word[FIFO_DATA_OUT_Z_L]),
-                    imu->fullRange_XL);
+                    imu->fullRange_XL, true);
       sample[tagcnt].counter = sample_counter;
       break;
     }
@@ -537,7 +491,7 @@ SampleStatus LSM6DSOXFIFOClass::decodeWord(uint16_t idx)
                     bytesToInt16(word[FIFO_DATA_OUT_X_H], word[FIFO_DATA_OUT_X_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Y_H], word[FIFO_DATA_OUT_Y_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Z_H], word[FIFO_DATA_OUT_Z_L]),
-                    imu->fullRange_XL);
+                    imu->fullRange_XL, true);
       sample[tagcnt_2].counter = sample_counter-2;
       break;
     }
@@ -548,7 +502,7 @@ SampleStatus LSM6DSOXFIFOClass::decodeWord(uint16_t idx)
                     bytesToInt16(word[FIFO_DATA_OUT_X_H], word[FIFO_DATA_OUT_X_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Y_H], word[FIFO_DATA_OUT_Y_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Z_H], word[FIFO_DATA_OUT_Z_L]),
-                    imu->fullRange_XL);
+                    imu->fullRange_XL, true);
       sample[tagcnt_1].counter = sample_counter-1;
       break;
     }
@@ -558,13 +512,15 @@ SampleStatus LSM6DSOXFIFOClass::decodeWord(uint16_t idx)
       int16_t XL_X_2 = sample[tagcnt_3].XL.rawXYZ[X_IDX] + signextend<8>(word[FIFO_DATA_OUT_X_L]);
       int16_t XL_Y_2 = sample[tagcnt_3].XL.rawXYZ[Y_IDX] + signextend<8>(word[FIFO_DATA_OUT_X_H]);
       int16_t XL_Z_2 = sample[tagcnt_3].XL.rawXYZ[Z_IDX] + signextend<8>(word[FIFO_DATA_OUT_Y_L]);
-      setSampleData(sample[tagcnt_2].XL, XL_X_2, XL_Y_2, XL_Z_2, imu->fullRange_XL);
+      // Note that TAGCNT-2 sample's validity depends on the old TAGCNT-3 sample's validity
+      setSampleData(sample[tagcnt_2].XL, XL_X_2, XL_Y_2, XL_Z_2, imu->fullRange_XL, sample[tagcnt_3].XL.valid);
       sample[tagcnt_2].counter = sample_counter-2;
 
       int16_t XL_X_1 = XL_X_2 + signextend<8>(word[FIFO_DATA_OUT_Y_H]);
       int16_t XL_Y_1 = XL_Y_2 + signextend<8>(word[FIFO_DATA_OUT_Z_L]);
       int16_t XL_Z_1 = XL_Z_2 + signextend<8>(word[FIFO_DATA_OUT_Z_H]);
-      setSampleData(sample[tagcnt_1].XL, XL_X_1, XL_Y_1, XL_Z_1, imu->fullRange_XL);
+      // Note that TAGCNT-1 sample's validity depends on TAGCNT-2 sample's validity
+      setSampleData(sample[tagcnt_1].XL, XL_X_1, XL_Y_1, XL_Z_1, imu->fullRange_XL, sample[tagcnt_2].XL.valid);
       sample[tagcnt_1].counter = sample_counter-1;
       break;
     }
@@ -577,21 +533,24 @@ SampleStatus LSM6DSOXFIFOClass::decodeWord(uint16_t idx)
       int16_t XL_X_2 = sample[tagcnt_3].XL.rawXYZ[X_IDX] + dx;
       int16_t XL_Y_2 = sample[tagcnt_3].XL.rawXYZ[Y_IDX] + dy;
       int16_t XL_Z_2 = sample[tagcnt_3].XL.rawXYZ[Z_IDX] + dz;
-      setSampleData(sample[tagcnt_2].XL, XL_X_2, XL_Y_2, XL_Z_2, imu->fullRange_XL);
+      // Note that TAGCNT-2 sample's validity depends on the old TAGCNT-3 sample's validity
+      setSampleData(sample[tagcnt_2].XL, XL_X_2, XL_Y_2, XL_Z_2, imu->fullRange_XL, sample[tagcnt_3].XL.valid);
       sample[tagcnt_2].counter = sample_counter-2;
 
       extend5bits(word[FIFO_DATA_OUT_Y_H], word[FIFO_DATA_OUT_Y_L], dx, dy, dz);
       int16_t XL_X_1 = XL_X_2 + dx;
       int16_t XL_Y_1 = XL_Y_2 + dy;
       int16_t XL_Z_1 = XL_Z_2 + dz;
-      setSampleData(sample[tagcnt_1].XL, XL_X_1, XL_Y_1, XL_Z_1, imu->fullRange_XL);
+      // Note that TAGCNT-1 sample's validity depends on TAGCNT-2 sample's validity
+      setSampleData(sample[tagcnt_1].XL, XL_X_1, XL_Y_1, XL_Z_1, imu->fullRange_XL, sample[tagcnt_2].XL.valid);
       sample[tagcnt_1].counter = sample_counter-1;
 
       extend5bits(word[FIFO_DATA_OUT_Z_H], word[FIFO_DATA_OUT_Z_L], dx, dy, dz);
       int16_t XL_X = XL_X_1 + dx;
       int16_t XL_Y = XL_Y_1 + dy;
       int16_t XL_Z = XL_Z_1 + dz;
-      setSampleData(sample[tagcnt].XL, XL_X, XL_Y, XL_Z, imu->fullRange_XL);
+      // Note that TAGCNT sample's validity depends on TAGCNT-1 sample's validity
+      setSampleData(sample[tagcnt].XL, XL_X, XL_Y, XL_Z, imu->fullRange_XL, sample[tagcnt_1].XL.valid);
       sample[tagcnt  ].counter = sample_counter;
       break;
     }
@@ -602,7 +561,7 @@ SampleStatus LSM6DSOXFIFOClass::decodeWord(uint16_t idx)
                     bytesToInt16(word[FIFO_DATA_OUT_X_H], word[FIFO_DATA_OUT_X_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Y_H], word[FIFO_DATA_OUT_Y_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Z_H], word[FIFO_DATA_OUT_Z_L]),
-                    imu->fullRange_G);
+                    imu->fullRange_G, true);
       sample[tagcnt_2].counter = sample_counter-2; // Necessary if XL is not recorded in FIFO
       break;    
     }
@@ -613,7 +572,7 @@ SampleStatus LSM6DSOXFIFOClass::decodeWord(uint16_t idx)
                     bytesToInt16(word[FIFO_DATA_OUT_X_H], word[FIFO_DATA_OUT_X_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Y_H], word[FIFO_DATA_OUT_Y_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Z_H], word[FIFO_DATA_OUT_Z_L]),
-                    imu->fullRange_G);
+                    imu->fullRange_G, true);
       sample[tagcnt_1].counter = sample_counter-1; // Necessary if XL is not recorded in FIFO
       break;
     }
@@ -623,13 +582,15 @@ SampleStatus LSM6DSOXFIFOClass::decodeWord(uint16_t idx)
       int16_t G_X_2 = sample[tagcnt_3].G.rawXYZ[X_IDX] + signextend<8>(word[FIFO_DATA_OUT_X_L]);
       int16_t G_Y_2 = sample[tagcnt_3].G.rawXYZ[Y_IDX] + signextend<8>(word[FIFO_DATA_OUT_X_H]);
       int16_t G_Z_2 = sample[tagcnt_3].G.rawXYZ[Z_IDX] + signextend<8>(word[FIFO_DATA_OUT_Y_L]);
-      setSampleData(sample[tagcnt_2].G, G_X_2, G_Y_2, G_Z_2, imu->fullRange_G);
+      // Note that TAGCNT-2 sample's validity depends on the old TAGCNT-3 sample's validity
+      setSampleData(sample[tagcnt_2].G, G_X_2, G_Y_2, G_Z_2, imu->fullRange_G, sample[tagcnt_3].G.valid);
       sample[tagcnt_2].counter = sample_counter-2;  // Necessary if XL is not recorded in FIFO
 
       int16_t G_X_1 = G_X_2 + signextend<8>(word[FIFO_DATA_OUT_Y_H]);
       int16_t G_Y_1 = G_Y_2 + signextend<8>(word[FIFO_DATA_OUT_Z_L]);
       int16_t G_Z_1 = G_Z_2 + signextend<8>(word[FIFO_DATA_OUT_Z_H]);
-      setSampleData(sample[tagcnt_1].G, G_X_1, G_Y_1, G_Z_1, imu->fullRange_G);
+      // Note that TAGCNT-1 sample's validity depends on TAGCNT-2 sample's validity
+      setSampleData(sample[tagcnt_1].G, G_X_1, G_Y_1, G_Z_1, imu->fullRange_G, sample[tagcnt_2].G.valid);
       sample[tagcnt_1].counter = sample_counter-1;  // Necessary if XL is not recorded in FIFO
       break;
     }
@@ -642,21 +603,24 @@ SampleStatus LSM6DSOXFIFOClass::decodeWord(uint16_t idx)
       int16_t G_X_2 = sample[tagcnt_3].G.rawXYZ[X_IDX] + dx;
       int16_t G_Y_2 = sample[tagcnt_3].G.rawXYZ[Y_IDX] + dy;
       int16_t G_Z_2 = sample[tagcnt_3].G.rawXYZ[Z_IDX] + dz;
-      setSampleData(sample[tagcnt_2].G, G_X_2, G_Y_2, G_Z_2, imu->fullRange_G);
+      // Note that TAGCNT-2 sample's validity depends on the old TAGCNT-3 sample's validity
+      setSampleData(sample[tagcnt_2].G, G_X_2, G_Y_2, G_Z_2, imu->fullRange_G, sample[tagcnt_3].G.valid);
       sample[tagcnt_2].counter = sample_counter-2; // Necessary if XL is not recorded in FIFO
 
       extend5bits(word[FIFO_DATA_OUT_Y_H], word[FIFO_DATA_OUT_Y_L], dx, dy, dz);
       int16_t G_X_1 = G_X_2 + dx;
       int16_t G_Y_1 = G_Y_2 + dy;
       int16_t G_Z_1 = G_Z_2 + dz;
-      setSampleData(sample[tagcnt_1].G, G_X_1, G_Y_1, G_Z_1, imu->fullRange_G);
+      // Note that TAGCNT-1 sample's validity depends on TAGCNT-2 sample's validity
+      setSampleData(sample[tagcnt_1].G, G_X_1, G_Y_1, G_Z_1, imu->fullRange_G, sample[tagcnt_2].G.valid);
       sample[tagcnt_1].counter = sample_counter-1;
 
       extend5bits(word[FIFO_DATA_OUT_Z_H], word[FIFO_DATA_OUT_Z_L], dx, dy, dz);
       int16_t G_X = G_X_1 + dx;
       int16_t G_Y = G_Y_1 + dy;
       int16_t G_Z = G_Z_1 + dz;
-      setSampleData(sample[tagcnt].G, G_X, G_Y, G_Z, imu->fullRange_G);
+      // Note that TAGCNT sample's validity depends on TAGCNT-1 sample's validity
+      setSampleData(sample[tagcnt].G, G_X, G_Y, G_Z, imu->fullRange_G, sample[tagcnt_1].G.valid);
       sample[tagcnt].counter = sample_counter;
       break;
     }
@@ -667,13 +631,29 @@ SampleStatus LSM6DSOXFIFOClass::decodeWord(uint16_t idx)
     case 0x11: // Sensor Hub Slave 3 Virtual Sensor hub data from slave 3
     case 0x12: // Step Counter Virtual Step counter data
     case 0x19: // Sensor Hub Nack Virtual Sensor hub nack from slave 0/1/2/3
-      return SampleStatus::TAG_NOT_IMPLEMENTED;
+      return DecodeTagResult::TAG_NOT_IMPLEMENTED;
 
     default:
-      return SampleStatus::UNKNOWN_TAG;
+      // Unknown tag.
+      // This is probably a communication problem. Note that the parity
+      // check has passed at this point, so this should basically not
+      // occur.
+      // The problem is, probably another tag was meant to be sent. It
+      // could be any of the tags above, so missing that tag MAY hurt
+      // XL or G data, at various tagcnts.
+      // If no compression is enabled, sample data for TAGCNT+0/1 should
+      // be invalidated. If compression is enabled, sample data for
+      // TAGCNT-1/-2 should also be invalidated.
+      invalidateSample(0);
+      invalidateSample(1);
+      if(compressionEnabled) {
+        invalidateSample(3); // -1 MOD 4 = 3
+        invalidateSample(2); // -2 MOD 4 = 2
+      }
+      return DecodeTagResult::UNKNOWN_TAG;
   }
 
-  return SampleStatus::OK;
+  return DecodeTagResult::OK;
 }
 
 inline void LSM6DSOXFIFOClass::extend5bits(uint8_t hi, uint8_t lo, 
@@ -688,20 +668,29 @@ void LSM6DSOXFIFOClass::setSampleData(SampleData &s,
                                       int16_t X, 
                                       int16_t Y, 
                                       int16_t Z, 
-                                      uint16_t fullRange)
+                                      uint16_t fullRange,
+                                      bool valid)
 {
   s.rawXYZ[X_IDX] = X;
   s.rawXYZ[Y_IDX] = Y;
   s.rawXYZ[Z_IDX] = Z;
   s.fullRange = fullRange;
 
-  float scale = fullRange * (1.0 / 32768);
-  s.XYZ[X_IDX] = X * scale;
-  s.XYZ[Y_IDX] = Y * scale;
-  s.XYZ[Z_IDX] = Z * scale;
+  s.valid = valid;
+  if(valid) {
+    float scale = fullRange * (1.0 / 32768);
+    s.XYZ[X_IDX] = X * scale;
+    s.XYZ[Y_IDX] = Y * scale;
+    s.XYZ[Z_IDX] = Z * scale;
+  } else {
+    // Data is invalid (or undefined)
+    s.XYZ[X_IDX] = NAN;
+    s.XYZ[Y_IDX] = NAN;
+    s.XYZ[Z_IDX] = NAN;
+  }
 }
 
-void LSM6DSOXFIFOClass::initializeSample(uint8_t idx)
+void LSM6DSOXFIFOClass::initializeSample(uint8_t idx, bool setStatusInvalid)
 {
   // timestamp and temperature are not always sent
   sample[idx].timestamp = NAN;
@@ -710,24 +699,40 @@ void LSM6DSOXFIFOClass::initializeSample(uint8_t idx)
   // Set counter and full scale to 'impossible' values
   // to help identifying errors
   sample[idx].counter = counter_uninitialized;
-  sample[idx].XL.fullRange = 0;
-  sample[idx].G.fullRange = 0;
 
   // If compression is disabled, XL and G data may be
-  // set to remarkable values in order to signal errors
+  // set to remarkable values in order to signal errors.
+  // If compression is used, older raw values may be
+  // used as reference for increments.
   if(!compressionEnabled) {
     int16_t default_value = 0x7FFF;
 
-    setSampleData(sample[idx].XL, default_value, default_value, default_value, 0);
+    bool valid_XL = sample[idx].XL.valid & !setStatusInvalid;
+    setSampleData(sample[idx].XL, default_value, default_value, default_value, 0, valid_XL);
     sample[idx].XL.XYZ[X_IDX] = NAN;
     sample[idx].XL.XYZ[Y_IDX] = NAN;
     sample[idx].XL.XYZ[Z_IDX] = NAN;
 
-    setSampleData(sample[idx].G, default_value, default_value, default_value, 0);
+    bool valid_G = sample[idx].G.valid & !setStatusInvalid;
+    setSampleData(sample[idx].G, default_value, default_value, default_value, 0, valid_G);
     sample[idx].G.XYZ[X_IDX] = NAN;
     sample[idx].G.XYZ[Y_IDX] = NAN;
     sample[idx].G.XYZ[Z_IDX] = NAN;
   }
+}
+
+void LSM6DSOXFIFOClass::invalidateSample(uint8_t idx)
+{
+  setSampleData(sample[idx].XL,
+                sample[idx].XL.rawXYZ[X_IDX],
+                sample[idx].XL.rawXYZ[Y_IDX], 
+                sample[idx].XL.rawXYZ[Z_IDX], 
+                sample[idx].XL.fullRange, false);
+  setSampleData(sample[idx].G,
+                sample[idx].G.rawXYZ[X_IDX],
+                sample[idx].G.rawXYZ[Y_IDX], 
+                sample[idx].G.rawXYZ[Z_IDX], 
+                sample[idx].G.fullRange, false);
 }
 
 /*/ For debugging purposes
