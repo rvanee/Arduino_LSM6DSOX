@@ -77,7 +77,7 @@
 LSM6DSOXFIFOClass::LSM6DSOXFIFOClass(LSM6DSOXClass* imu) {
   this->imu = imu;
 
-  compressionEnabled = false;
+  compression_enabled = false;
 
   initializeSettings();
 }
@@ -92,7 +92,6 @@ void LSM6DSOXFIFOClass::initializeSettings(
   float     BDR_G,                    // G Batch Data Rate: 0-6667
   float     BDR_temperature,          // Temperature Batch Data Rate: 0/1.6/12.5/52
   uint8_t   timestamp_decimation,     // Timestamp every 0/1/8/32 batch data
-  bool      timestamp_reconstruction, // Reconstruct unbatched timestamps
   
   // Compression
   bool      compression,              // true = enable compression
@@ -113,7 +112,6 @@ void LSM6DSOXFIFOClass::initializeSettings(
   settings.BDR_G = BDR_G;
   settings.BDR_temperature = BDR_temperature;
   settings.timestamp_decimation = timestamp_decimation;
-  settings.timestamp_reconstruction = timestamp_reconstruction;
   
   // Compression
   settings.compression = compression;
@@ -192,7 +190,10 @@ void LSM6DSOXFIFOClass::begin()
   buffer_empty = true;
 
   // Decoder
-  compressionEnabled = settings.compression;
+  compression_enabled = settings.compression;
+    // Timestamp reconstruction is only possible and relevant if
+    // timestamp decimation is > 0 and >1, respectively
+  timestamp_reconstruction_enabled = settings.timestamp_decimation > 1;
   sample_counter = counter_uninitialized;
   to_release_counter = counter_uninitialized;
 
@@ -224,12 +225,13 @@ int LSM6DSOXFIFOClass::readStatus(FIFOStatus& status)
   
   int result = imu->readRegisters(LSM6DSOX_STATUS1, status_registers, 2);
   if(result == 1) {
-    status.DIFF_FIFO = ((uint16_t)(status_registers[1] & MASK_DIFF_FIFO_H) << 8) | status_registers[0];
-    status.FIFO_OVR_LATCHED = status_registers[1] & MASK_FIFO_OVR_LATCHED;
-    status.COUNTER_BDR_IA = status_registers[1] & MASK_COUNTER_BDR_IA;
-    status.FIFO_FULL_IA = status_registers[1] & MASK_FIFO_FULL_IA;
-    status.FIFO_OVR_IA = status_registers[1] & MASK_FIFO_OVR_IA;
-    status.FIFO_WTM_IA = status_registers[1] & MASK_FIFO_WTM_IA;
+    uint8_t fifo_status2 = status_registers[1];
+    status.DIFF_FIFO = ((uint16_t)(fifo_status2 & MASK_DIFF_FIFO_H) << 8) | status_registers[0];
+    status.FIFO_OVR_LATCHED = fifo_status2 & MASK_FIFO_OVR_LATCHED;
+    status.COUNTER_BDR_IA   = fifo_status2 & MASK_COUNTER_BDR_IA;
+    status.FIFO_FULL_IA     = fifo_status2 & MASK_FIFO_FULL_IA;
+    status.FIFO_OVR_IA      = fifo_status2 & MASK_FIFO_OVR_IA;
+    status.FIFO_WTM_IA      = fifo_status2 & MASK_FIFO_WTM_IA;
   }
   return result;
 }
@@ -252,12 +254,12 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
   }
 
   // Read data from FIFO to buffer
-  while(to_read > 0) {
+  do {
     // Break down read operations into a maximum number of words
     uint16_t read_now = min(to_read, READ_MAX_WORDS);
-
     result = imu->readRegisters(LSM6DSOX_FIFO_DATA_OUT_TAG, buffer, read_now*BUFFER_BYTES_PER_WORD);
     if(result != 1) return ReadResult::READ_ERROR;
+    to_read -= read_now;
 
     // Process read words
     for(uint16_t wordidx = 0; wordidx < read_now; wordidx++) {
@@ -276,22 +278,24 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
         // If no compression is enabled, sample data for TAGCNT+0/1 should
         // be invalidated. If compression is enabled, sample data for
         // TAGCNT-1/2 should also be invalidated.
-        invalidateSample(0);
-        invalidateSample(1);
-        if(compressionEnabled) {
-          invalidateSample(3); // -1 MOD 4 = 3
-          invalidateSample(2); // -2 MOD 4 = 2
+        invalidateSample(sample_counter & 0x03);
+        invalidateSample((sample_counter+1) & 0x03);
+        if(compression_enabled) {
+          invalidateSample((sample_counter-1) & 0x03);
+          invalidateSample((sample_counter-2) & 0x03);
         }
         // This word can't be evaluated any further, but we can go on 
         // decoding the next words
         continue;
       }
 
-      // Check if a sample can be released.
-      // Also manages counters and timestamps
+      // Update sample counter based on tagcnt
       uint8_t tagcnt = (tag_byte & MASK_FIFO_TAG_CNT) >> 1;
+      updateSampleCounter(tagcnt);
+
+      // Check if a sample can be released.
       Sample extracted_sample;
-      if(releaseSample(tagcnt, extracted_sample)) {
+      while(releaseSample(extracted_sample)) {
         // Store sample in queue
         if (!sampleQueue.putQ(extracted_sample)) {
           return ReadResult::QUEUE_FULL;
@@ -322,17 +326,15 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
           return ReadResult::LOGIC_ERROR;
       } 
     } // END for(uint16_t wordidx = 0...
-
-    to_read -= read_now;
-  } // END while(to_read > 0)
+  } while(to_read > 0);
 
   return ReadResult::DATA_READ;
 }
 
-int LSM6DSOXFIFOClass::releaseSample(uint8_t tagcnt, Sample& extracted_sample)
+void LSM6DSOXFIFOClass::updateSampleCounter(uint8_t tagcnt)
 {
-  // Note: this function updates previoustagcnt, sample_counter and initializes
-  // a new sample in the circular sample buffer
+  // Note: this function updates prev_tagcnt, 
+  // sample_counter and to_release_counter
 
   // sample_counter is undefined at fifo startup
   if(sample_counter == counter_uninitialized) {
@@ -355,20 +357,23 @@ int LSM6DSOXFIFOClass::releaseSample(uint8_t tagcnt, Sample& extracted_sample)
     sample_counter &= 0xFFFFFFFC;
     sample_counter |= tagcnt;
   }
+}
 
+bool LSM6DSOXFIFOClass::releaseSample(Sample& extracted_sample)
+{
   // If compression is enabled, there should be a delay of
   // 2 in releasing samples to account for the compression
   // algorithm modifying data at T-2 and T-1, rather than 
   // just at time T.
-  uint8_t delta_cnt = compressionEnabled << 1;
+  uint8_t delta_cnt = compression_enabled << 1;
   if((to_release_counter + delta_cnt) < sample_counter) {
     uint8_t releasecnt = (uint8_t)(to_release_counter & 0x03);
+    to_release_counter++;
     extracted_sample = sample[releasecnt];
     initializeSample(releasecnt);
-    to_release_counter++;
 
     // Timestamp reconstruction
-    if(settings.timestamp_reconstruction) {
+    if(timestamp_reconstruction_enabled) {
       // Reconstruction is only necessary if sample's timestamp undefined...
       if(isnan(extracted_sample.timestamp) && 
         // ... and only possible if delta timestamp per sample is known
@@ -383,15 +388,15 @@ int LSM6DSOXFIFOClass::releaseSample(uint8_t tagcnt, Sample& extracted_sample)
       }
     }
 
-    return 1; // Sample released
+    return true; // Sample released
   }
 
-  return 0; // No sample released
+  return false; // No sample released
 }
 
 DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
 {
-  // Note: this function updates fullRange_G, fullRange_XL and compressionEnabled,
+  // Note: this function updates fullRange_G, fullRange_XL and compression_enabled,
   // as well as the sample circular buffer
   
   // Tag counters
@@ -481,7 +486,7 @@ DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
       sample[tagcnt].XL.fullRange = imu->fullRange_XL;
 
       // Compression
-      compressionEnabled = word[FIFO_DATA_OUT_Y_H] & 0x80;
+      compression_enabled = word[FIFO_DATA_OUT_Y_H] & 0x80;
       break;
     }
 
@@ -641,14 +646,13 @@ DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
       // The problem is, probably another tag was meant to be sent. It
       // could be any of the tags above, so missing that tag MAY hurt
       // XL or G data, at various tagcnts.
-      // If no compression is enabled, sample data for TAGCNT+0/1 should
+      // If no compression is enabled, sample data for TAGCNT should
       // be invalidated. If compression is enabled, sample data for
       // TAGCNT-1/-2 should also be invalidated.
-      invalidateSample(0);
-      invalidateSample(1);
-      if(compressionEnabled) {
-        invalidateSample(3); // -1 MOD 4 = 3
-        invalidateSample(2); // -2 MOD 4 = 2
+      invalidateSample(tagcnt);
+      if(compression_enabled) {
+        invalidateSample(tagcnt_1);
+        invalidateSample(tagcnt_2);
       }
       return DecodeTagResult::UNKNOWN_TAG;
   }
@@ -696,15 +700,14 @@ void LSM6DSOXFIFOClass::initializeSample(uint8_t idx, bool setStatusInvalid)
   sample[idx].timestamp = NAN;
   sample[idx].temperature = NAN;
 
-  // Set counter and full scale to 'impossible' values
-  // to help identifying errors
+  // Set counter to 'impossible' value to help identify errors
   sample[idx].counter = counter_uninitialized;
 
   // If compression is disabled, XL and G data may be
   // set to remarkable values in order to signal errors.
   // If compression is used, older raw values may be
   // used as reference for increments.
-  if(!compressionEnabled) {
+  if(!compression_enabled) {
     int16_t default_value = 0x7FFF;
 
     bool valid_XL = sample[idx].XL.valid & !setStatusInvalid;

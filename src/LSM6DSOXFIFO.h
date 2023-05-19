@@ -68,7 +68,6 @@ public:
   float     BDR_G;                    // G Batch Data Rate: 0-6667
   float     BDR_temperature;          // Temperature Batch Data Rate: 0/1.6/12.5/52
   uint8_t   timestamp_decimation;     // Timestamp every 0/1/8/32 batch data
-  bool      timestamp_reconstruction; // Reconstruct unbatched timestamps
   
   // Compression
   bool      compression;              // true = enable compression
@@ -140,7 +139,6 @@ class LSM6DSOXFIFOClass {
       float     BDR_G = 104,              // G Batch Data Rate: 0-6667
       float     BDR_temperature = 1.6,    // Temperature Batch Data Rate: 0/1.6/12.5/52
       uint8_t   timestamp_decimation = 1, // Timestamp every 0/1/8/32 batch data
-      bool      timestamp_reconstruction = true, // Reconstruct unbatched timestamps
 
       // Compression
       bool      compression = true,       // true = enable compression
@@ -167,7 +165,8 @@ class LSM6DSOXFIFOClass {
     }
 
   private:   
-    int             releaseSample(uint8_t tagcnt, Sample& extracted_sample);
+    void            updateSampleCounter(uint8_t tagcnt);
+    bool            releaseSample(Sample& extracted_sample);
     DecodeTagResult decodeWord(uint8_t *word);
   
     void            extend5bits(uint8_t hi, uint8_t lo, int16_t &delta_x, int16_t &delta_y, int16_t &delta_z);
@@ -200,7 +199,8 @@ class LSM6DSOXFIFOClass {
     uint16_t        write_idx;
     bool            buffer_empty;
 
-    bool            compressionEnabled;
+    bool            compression_enabled;
+    bool            timestamp_reconstruction_enabled;
 
     /*/ For debugging purposes
     void displaySamples();
