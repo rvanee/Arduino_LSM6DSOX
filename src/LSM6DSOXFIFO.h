@@ -191,7 +191,7 @@ class LSM6DSOXFIFOClass {
     uint64_t        timestamp64;
     uint64_t        timestamp64_prev;
     uint32_t        timestamp_counter;
-    float           dt_per_sample;
+    double          dt_per_sample;
 
     // Data buffer (management)
     uint8_t         buffer[BUFFER_WORDS * BUFFER_BYTES_PER_WORD];

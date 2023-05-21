@@ -293,7 +293,7 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
       uint8_t tagcnt = (tag_byte & MASK_FIFO_TAG_CNT) >> 1;
       updateSampleCounter(tagcnt);
 
-      // Check if a sample can be released.
+      // Check if one or more samples can be released.
       Sample extracted_sample;
       while(releaseSample(extracted_sample)) {
         // Store sample in queue
@@ -401,7 +401,7 @@ DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
   
   // Tag counters
   uint8_t tag_byte = word[FIFO_DATA_OUT_TAG];
-  uint8_t tagcnt = (tag_byte & MASK_FIFO_TAG_CNT) >> 1;  // T
+  uint8_t tagcnt   = (tag_byte & MASK_FIFO_TAG_CNT) >> 1;  // T
   uint8_t tagcnt_1 = (tagcnt-1) & 0x03; // T-1 mod 4
   uint8_t tagcnt_2 = (tagcnt-2) & 0x03; // T-2 mod 4
   uint8_t tagcnt_3 = (tagcnt-3) & 0x03; // T-3 mod 4
@@ -465,8 +465,8 @@ DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
       dt_per_sample = (sample_counter    == counter_uninitialized) ||
                       (timestamp_counter == counter_uninitialized) ?
                       NAN :
-                      float(timestamp64    - timestamp64_prev) / 
-                           (sample_counter - timestamp_counter);
+                      double(timestamp64    - timestamp64_prev) / 
+                            (sample_counter - timestamp_counter);
 
       // store current sample counter as last timestamp counter
       timestamp_counter = sample_counter;
