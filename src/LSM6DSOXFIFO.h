@@ -22,6 +22,7 @@
 
 #include <Arduino.h>
 #include <limits>
+#include "TimestampEstimator.h"
 #include <eventqueue.h>
 
 // I2C buffer size is limited to 32 bytes, see link below.
@@ -29,10 +30,10 @@
 #define I2C_BUFFER_LENGTH           32
 #define READ_MAX_WORDS              (I2C_BUFFER_LENGTH / BUFFER_BYTES_PER_WORD)
 
-// Packet buffer size. Define extra slots for compression, timestamp and config change
-#define BUFFER_WORDS          READ_MAX_WORDS  // Number of 'words'
+#define BUFFER_WORDS          READ_MAX_WORDS  // IMU 'word' buffer size
 #define BUFFER_BYTES_PER_WORD 7               // Tag + 3 * (2 byte word)
-#define TAGCNT_BUFFER_SIZE    4               // 4 possible TAGCNT values (0-3)
+#define SAMPLE_BUFFER_SIZE    4               // Should be a power of 2
+#define SAMPLE_BUFFER_MASK    (SAMPLE_BUFFER_SIZE-1)
 
 #define FIFO_DATA_OUT_TAG     0
 #define FIFO_DATA_OUT_X_L     1
@@ -41,10 +42,6 @@
 #define FIFO_DATA_OUT_Y_H     4
 #define FIFO_DATA_OUT_Z_L     5
 #define FIFO_DATA_OUT_Z_H     6
-
-// Sample buffer size. It should be larger for higher sample rates and for longer
-// delays between sample collection and processing.
-#define SAMPLE_BUFFER_SIZE    32
 
 enum class ReadResult {
   NO_DATA_AVAILABLE,
@@ -183,7 +180,7 @@ class LSM6DSOXFIFOClass {
     EventQueue<Sample, SAMPLE_BUFFER_SIZE> sampleQueue;
 
     // Sample buffer (management)
-    Sample          sample[TAGCNT_BUFFER_SIZE]; // Ring buffer, contains the words at T-3, T-2, T-1 and T
+    Sample          sample[SAMPLE_BUFFER_SIZE]; // Ring buffer, contains the words at T-3, T-2, T-1 and T
     uint32_t        sample_counter;
     uint32_t        to_release_counter;
 
@@ -192,6 +189,9 @@ class LSM6DSOXFIFOClass {
     uint64_t        timestamp64_prev;
     uint32_t        timestamp_counter;
     double          dt_per_sample;
+
+    // MCU timestamp estimation
+    TimestampEstimator MCU_timestamp_estimator;
 
     // Data buffer (management)
     uint8_t         buffer[BUFFER_WORDS * BUFFER_BYTES_PER_WORD];
