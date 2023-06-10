@@ -79,6 +79,7 @@ LSM6DSOXFIFOClass::LSM6DSOXFIFOClass(LSM6DSOXClass* imu) {
   this->imu = imu;
 
   compression_enabled = false;
+  use_MCU_timestamp = false;
 
   initializeSettings();
 }
@@ -131,7 +132,7 @@ void LSM6DSOXFIFOClass::initializeSettings(
 
 void LSM6DSOXFIFOClass::begin()
 {
-  // Turn off FIFO. This will also empty its queue
+  // Turn off FIFO. This will also empty its fifo queue
   end();
 
   // Process settings
@@ -185,10 +186,13 @@ void LSM6DSOXFIFOClass::begin()
 
   // Reset internal state
 
-  // Buffer management
-  read_idx = 0;
-  write_idx = 0;
-  buffer_empty = true;
+  // Sample buffer management
+  sample_counter = 0; // Actual sample number. Lowest 2 bits resemble TAGCNT
+  read_counter = 0;   // First finished sample number that is not yet read
+  // Initialize circular sample buffer. Set G and XL data to invalid
+  for(uint8_t idx = 0; idx < SAMPLE_BUFFER_SIZE; idx++) {
+    initializeSample(idx, true);
+  } 
 
   // Decoder
   compression_enabled = settings.compression;
@@ -197,23 +201,16 @@ void LSM6DSOXFIFOClass::begin()
   timestamp_reconstruction_enabled = settings.timestamp_decimation > 1;
   timestamp64 = 0;
   timestamp64_prev = 0;
-  timestamp_counter = counter_uninitialized;
+  timestamp_counter = 0;
   dt_per_sample = NAN;
 
   // If IMU fifo timestamping is disabled, use time stamp estimation
   // using the MCU's micros() clock
-  if(settings.timestamp_decimation == 0) {
+  use_MCU_timestamp = settings.timestamp_decimation == 0;
+  if(use_MCU_timestamp) {
     // Initialize MCU timestamp estimator using the current clock value
     MCU_timestamp_estimator.reset(micros());
   }
-
-  sample_counter = counter_uninitialized;
-  to_release_counter = counter_uninitialized;
-
-  // Initialize circular sample buffer. Set G and XL data to invalid
-  for(uint8_t idx = 0; idx < SAMPLE_BUFFER_SIZE; idx++) {
-    initializeSample(idx, true);
-  } 
 }
 
 void LSM6DSOXFIFOClass::end()
@@ -245,42 +242,44 @@ int LSM6DSOXFIFOClass::readStatus(FIFOStatus& status)
 
 ReadResult LSM6DSOXFIFOClass::fillQueue()
 {
-  FIFOStatus status;
-  int result = readStatus(status);
-  if(result != 1) return ReadResult::READ_ERROR;
-
-  // Check if new data available
-  uint16_t to_read = status.DIFF_FIFO;
-  if(to_read == 0) {
-    return ReadResult::NO_DATA_AVAILABLE;
-  }
-
-  // Check for FIFO overflow
-  if(status.FIFO_OVR_IA) {
-    return ReadResult::FIFO_OVERFLOW;
-  }
-
-  // If no IMU timestamps are to be read, MCU timestamp should be used
+  uint16_t to_read;
   unsigned long MCU_micros;
-  bool use_MCU_timestamp = settings.timestamp_decimation == 0;
+  uint8_t status_registers[2];
+  int result = imu->readRegisters(LSM6DSOX_STATUS1, status_registers, 2);
+    
+  // If no IMU timestamps are to be read, MCU timestamp should be used.
+  // Note that this code should be placed as close as possible to the 
+  // read operation above in order to minimize delay between addition
+  // of the last word to the fifo, right before the status registers
+  // are read, and obtaining the MCU's microsecond-precision clock.
   if(use_MCU_timestamp) {
-    MCU_micros = micros();
+     MCU_micros = micros();
   }
 
-  // Read data from FIFO to buffer
-  // TODO First read all data as soon as possible, then
+  // Now process the status data
+  if(result != 1) return ReadResult::READ_ERROR;
+  uint8_t fifo_status2 = status_registers[1];
+  // Find number of words currently in fifo
+  to_read = ((uint16_t)(fifo_status2 & MASK_DIFF_FIFO_H) << 8) | status_registers[0];
+  // Check if new data available
+  if(to_read == 0) return ReadResult::NO_DATA_AVAILABLE;
+  // Check for FIFO overflow
+  if(fifo_status2 & MASK_FIFO_OVR_IA) return ReadResult::FIFO_OVERFLOW;
+
+  // Read data from FIFO to local word buffer
   do {
-    // Break down read operations into a maximum number of words
+    // Break down read operations into a maximum number of 'fifo words'
+    uint8_t  read_buffer[READ_MAX_WORDS * BUFFER_BYTES_PER_WORD];
     uint16_t read_now = min(to_read, READ_MAX_WORDS);
     result = imu->readRegisters(LSM6DSOX_FIFO_DATA_OUT_TAG, 
-                                buffer,
+                                read_buffer,
                                 read_now*BUFFER_BYTES_PER_WORD);
     if(result != 1) return ReadResult::READ_ERROR;
     to_read -= read_now;
 
-    // Process read words
+    // Process words read above
     for(uint16_t wordidx = 0; wordidx < read_now; wordidx++) {
-      uint8_t *word = buffer_pointer(wordidx);
+      uint8_t *word = &read_buffer[wordidx * BUFFER_BYTES_PER_WORD];
       uint8_t tag_byte = word[FIFO_DATA_OUT_TAG];
 
       // Perform parity check
@@ -294,7 +293,7 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
         // involved.
         // If no compression is enabled, sample data for TAGCNT+0/1 should
         // be invalidated. If compression is enabled, sample data for
-        // TAGCNT-1/2 should also be invalidated.
+        // the previous 2 samples should also be invalidated.
         invalidateSample(sample_counter & SAMPLE_BUFFER_MASK);
         invalidateSample((sample_counter+1) & SAMPLE_BUFFER_MASK);
         if(compression_enabled) {
@@ -308,18 +307,41 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
 
       // Update sample counter based on tagcnt
       uint8_t tagcnt = (tag_byte & MASK_FIFO_TAG_CNT) >> 1;
-      updateSampleCounter(tagcnt);
+      uint8_t prev_tagcnt = sample_counter & SAMPLE_TAGCNT_MASK;
+      uint32_t release_counter = sample_counter;
+      sample_counter = sample_counter + tagcnt - prev_tagcnt;
+      // TAGCNT rollover?
+      if(tagcnt < prev_tagcnt) sample_counter += 4;
 
-      // Check if one or more samples can be released.
-      Sample extracted_sample;
-      while(releaseSample(extracted_sample)) {
-        // Store sample in queue
-        if (!sampleQueue.putQ(extracted_sample)) {
-          return ReadResult::QUEUE_FULL;
+      // Perform timestamp reconstruction on samples that can be
+      // released, if required
+      if(timestamp_reconstruction_enabled) {
+        // If compression is enabled, there should be a delay of
+        // 2 in releasing samples to account for the compression
+        // algorithm modifying data at T-2 and T-1, rather than 
+        // just at time T.
+        release_counter += compression_enabled << 1;
+        while(release_counter < sample_counter) {
+          release_counter++;
+          Sample *finished_sample = &sample_buffer[(uint8_t)(release_counter & SAMPLE_BUFFER_MASK)];
+
+          // Reconstruction is only necessary if sample's timestamp undefined...
+          if(isnan(finished_sample->timestamp) && 
+            // ... and only possible if delta timestamp per sample is known
+            !isnan(dt_per_sample)) {
+            // Calculate number of samples between newest timestamp and this sample
+            int delta_samples = (finished_sample->counter > timestamp_counter) ?
+              finished_sample->counter - timestamp_counter :
+              -int(timestamp_counter - finished_sample->counter);
+            // Set sample's timestamp relative to latest timestamp and correct it
+            // TODO use fixed point arithmetic
+            finished_sample->timestamp =
+              imu->internalFrequencyFactor * (timestamp64 + delta_samples*dt_per_sample);
+          }
         }
       }
 
-      // Decode word, writes to small circular sample buffer
+      // Decode word, writes to circular sample buffer
       DecodeTagResult decodeResult = decodeWord(word);
       switch(decodeResult) {
         case DecodeTagResult::OK:
@@ -357,66 +379,18 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
   return ReadResult::DATA_READ;
 }
 
-void LSM6DSOXFIFOClass::updateSampleCounter(uint8_t tagcnt)
+bool LSM6DSOXFIFOClass::retrieveSample(Sample& sample)
 {
-  // Note: this function updates prev_tagcnt, 
-  // sample_counter and to_release_counter
-
-  // sample_counter is undefined at fifo startup
-  if(sample_counter == counter_uninitialized) {
-    // If still uninitialized, initialize it with tagcnt,
-    // so the lower 2 bits always resemble tagcnt
-    sample_counter = tagcnt;
-
-    // The first sample to be released is that of
-    // the current timestamp counter
-    to_release_counter = sample_counter;
-  }
-
-  // Update counter based on tagcnt
-  uint8_t prev_tagcnt = sample_counter & SAMPLE_BUFFER_MASK;
-  if(tagcnt != prev_tagcnt) {
-    // TAGCNT rollover?
-    if(tagcnt < prev_tagcnt) {
-      sample_counter += 4;
-    }
-    sample_counter &= 0xFFFFFFFC;
-    sample_counter |= tagcnt;
-  }
-}
-
-bool LSM6DSOXFIFOClass::releaseSample(Sample& extracted_sample)
-{
-  // If compression is enabled, there should be a delay of
-  // 2 in releasing samples to account for the compression
-  // algorithm modifying data at T-2 and T-1, rather than 
-  // just at time T.
+  // If compression is enabled, there should be a delay of 2 in
+  // releasing samples to account for the compression algorithm
+  // modifying data at T-2 and T-1, rather than just at time T.
   uint8_t delta_cnt = compression_enabled << 1;
-  if((to_release_counter + delta_cnt) < sample_counter) {
-    uint8_t releasecnt = (uint8_t)(to_release_counter & SAMPLE_BUFFER_MASK);
-    to_release_counter++;
-    extracted_sample = sample[releasecnt];
-    initializeSample(releasecnt);
-
-    // Timestamp reconstruction
-    if(timestamp_reconstruction_enabled) {
-      // Reconstruction is only necessary if sample's timestamp undefined...
-      if(isnan(extracted_sample.timestamp) && 
-        // ... and only possible if delta timestamp per sample is known
-         !isnan(dt_per_sample)) {
-        // Calculate number of samples between newest timestamp and this sample
-        int delta_samples = (extracted_sample.counter > timestamp_counter) ?
-          extracted_sample.counter - timestamp_counter :
-          -int(timestamp_counter - extracted_sample.counter);
-        // Set sample's timestamp relative to latest timestamp and correct it
-        extracted_sample.timestamp = 
-          imu->_internalFrequencyFactor * (timestamp64 + delta_samples*dt_per_sample);
-      }
-    }
-
+  // Check if a sample is available
+  if((read_counter + delta_cnt) < sample_counter) {
+    sample = sample_buffer[(uint8_t)(read_counter & SAMPLE_BUFFER_MASK)];
+    read_counter++;
     return true; // Sample released
   }
-
   return false; // No sample released
 }
 
@@ -436,29 +410,29 @@ DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
   switch(tag) {
     case 0x01: // Gyroscope NC Main Gyroscope uncompressed data
     {
-      setSampleData(sample[current].G,
+      setSampleData(&sample_buffer[current].G,
                     bytesToInt16(word[FIFO_DATA_OUT_X_H], word[FIFO_DATA_OUT_X_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Y_H], word[FIFO_DATA_OUT_Y_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Z_H], word[FIFO_DATA_OUT_Z_L]),
                     imu->fullRange_G, true);
-      sample[current].counter = sample_counter;
+      sample_buffer[current].counter = sample_counter;
       break;
     }
 
     case 0x02: // Accelerometer NC Main Accelerometer uncompressed data
     {
-      setSampleData(sample[current].XL,
+      setSampleData(&sample_buffer[current].XL,
                     bytesToInt16(word[FIFO_DATA_OUT_X_H], word[FIFO_DATA_OUT_X_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Y_H], word[FIFO_DATA_OUT_Y_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Z_H], word[FIFO_DATA_OUT_Z_L]),
                     imu->fullRange_XL, true);
-      sample[current].counter = sample_counter;
+      sample_buffer[current].counter = sample_counter;
       break;
     }
 
     case 0x03: // Temperature Auxiliary Temperature data
     {
-      sample[current].temperature = 
+      sample_buffer[current].temperature = 
         imu->temperatureIntToCelsius(bytesToInt16(word[FIFO_DATA_OUT_X_H], word[FIFO_DATA_OUT_X_L]));
       break;
     }
@@ -484,11 +458,10 @@ DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
       timestamp64 = (timestamp64 & 0xFFFFFFFF00000000) | timestamp;
 
       // Store (corrected) timestamp in current sample
-      sample[current].timestamp = timestamp64 * imu->_internalFrequencyFactor;
+      sample_buffer[current].timestamp = timestamp64 * imu->internalFrequencyFactor;
 
       // Calculate delta timestamp per sample (used for timestamp reconstruction)
-      dt_per_sample = (sample_counter    == counter_uninitialized) ||
-                      (timestamp_counter == counter_uninitialized) ?
+      dt_per_sample = (timestamp_counter == sample_counter) ?
                       NAN :
                       double(timestamp64    - timestamp64_prev) / 
                             (sample_counter - timestamp_counter);
@@ -503,12 +476,12 @@ DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
       // Gyro full range
       uint8_t fs_g = word[FIFO_DATA_OUT_X_H] >> 5; // FS1_G FS0_G FS_125
       imu->fullRange_G = LSM6DSOXTables::getFloatFromBits(fs_g, LSM6DSOXTables::FR_G_bits);
-      sample[current].G.fullRange = imu->fullRange_G;
+      sample_buffer[current].G.fullRange = imu->fullRange_G;
 
       // Accelerometer full range
       uint8_t fs_xl = word[FIFO_DATA_OUT_Y_L] >> 6; // FS1_XL FS0_XL
       imu->fullRange_XL = LSM6DSOXTables::getFloatFromBits(fs_xl, LSM6DSOXTables::FR_XL_bits);
-      sample[current].XL.fullRange = imu->fullRange_XL;
+      sample_buffer[current].XL.fullRange = imu->fullRange_XL;
 
       // Compression
       compression_enabled = word[FIFO_DATA_OUT_Y_H] & 0x80;
@@ -517,41 +490,41 @@ DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
 
     case 0x06: // Accelerometer NC_T_2 Main Accelerometer uncompressed batched at two times the previous time slot
     {
-      setSampleData(sample[current_2].XL,
+      setSampleData(&sample_buffer[current_2].XL,
                     bytesToInt16(word[FIFO_DATA_OUT_X_H], word[FIFO_DATA_OUT_X_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Y_H], word[FIFO_DATA_OUT_Y_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Z_H], word[FIFO_DATA_OUT_Z_L]),
                     imu->fullRange_XL, true);
-      sample[current_2].counter = sample_counter-2;
+      sample_buffer[current_2].counter = sample_counter-2;
       break;
     }
 
     case 0x07: // Accelerometer NC_T_1 Main Accelerometer uncompressed data batched at the previous time slot
     {
-      setSampleData(sample[current_1].XL,
+      setSampleData(&sample_buffer[current_1].XL,
                     bytesToInt16(word[FIFO_DATA_OUT_X_H], word[FIFO_DATA_OUT_X_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Y_H], word[FIFO_DATA_OUT_Y_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Z_H], word[FIFO_DATA_OUT_Z_L]),
                     imu->fullRange_XL, true);
-      sample[current_1].counter = sample_counter-1;
+      sample_buffer[current_1].counter = sample_counter-1;
       break;
     }
 
     case 0x08: // Accelerometer 2xC Main Accelerometer 2x compressed data
     {
-      int16_t XL_X_2 = sample[current_3].XL.rawXYZ[X_IDX] + signextend<8>(word[FIFO_DATA_OUT_X_L]);
-      int16_t XL_Y_2 = sample[current_3].XL.rawXYZ[Y_IDX] + signextend<8>(word[FIFO_DATA_OUT_X_H]);
-      int16_t XL_Z_2 = sample[current_3].XL.rawXYZ[Z_IDX] + signextend<8>(word[FIFO_DATA_OUT_Y_L]);
+      int16_t XL_X_2 = sample_buffer[current_3].XL.rawXYZ[X_IDX] + signextend<8>(word[FIFO_DATA_OUT_X_L]);
+      int16_t XL_Y_2 = sample_buffer[current_3].XL.rawXYZ[Y_IDX] + signextend<8>(word[FIFO_DATA_OUT_X_H]);
+      int16_t XL_Z_2 = sample_buffer[current_3].XL.rawXYZ[Z_IDX] + signextend<8>(word[FIFO_DATA_OUT_Y_L]);
       // Note that TAGCNT-2 sample's validity depends on the old TAGCNT-3 sample's validity
-      setSampleData(sample[current_2].XL, XL_X_2, XL_Y_2, XL_Z_2, imu->fullRange_XL, sample[current_3].XL.valid);
-      sample[current_2].counter = sample_counter-2;
+      setSampleData(&sample_buffer[current_2].XL, XL_X_2, XL_Y_2, XL_Z_2, imu->fullRange_XL, sample_buffer[current_3].XL.valid);
+      sample_buffer[current_2].counter = sample_counter-2;
 
       int16_t XL_X_1 = XL_X_2 + signextend<8>(word[FIFO_DATA_OUT_Y_H]);
       int16_t XL_Y_1 = XL_Y_2 + signextend<8>(word[FIFO_DATA_OUT_Z_L]);
       int16_t XL_Z_1 = XL_Z_2 + signextend<8>(word[FIFO_DATA_OUT_Z_H]);
       // Note that TAGCNT-1 sample's validity depends on TAGCNT-2 sample's validity
-      setSampleData(sample[current_1].XL, XL_X_1, XL_Y_1, XL_Z_1, imu->fullRange_XL, sample[current_2].XL.valid);
-      sample[current_1].counter = sample_counter-1;
+      setSampleData(&sample_buffer[current_1].XL, XL_X_1, XL_Y_1, XL_Z_1, imu->fullRange_XL, sample_buffer[current_2].XL.valid);
+      sample_buffer[current_1].counter = sample_counter-1;
       break;
     }
 
@@ -560,68 +533,68 @@ DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
       int16_t dx, dy, dz;
 
       extend5bits(word[FIFO_DATA_OUT_X_H], word[FIFO_DATA_OUT_X_L], dx, dy, dz);
-      int16_t XL_X_2 = sample[current_3].XL.rawXYZ[X_IDX] + dx;
-      int16_t XL_Y_2 = sample[current_3].XL.rawXYZ[Y_IDX] + dy;
-      int16_t XL_Z_2 = sample[current_3].XL.rawXYZ[Z_IDX] + dz;
+      int16_t XL_X_2 = sample_buffer[current_3].XL.rawXYZ[X_IDX] + dx;
+      int16_t XL_Y_2 = sample_buffer[current_3].XL.rawXYZ[Y_IDX] + dy;
+      int16_t XL_Z_2 = sample_buffer[current_3].XL.rawXYZ[Z_IDX] + dz;
       // Note that TAGCNT-2 sample's validity depends on the old TAGCNT-3 sample's validity
-      setSampleData(sample[current_2].XL, XL_X_2, XL_Y_2, XL_Z_2, imu->fullRange_XL, sample[current_3].XL.valid);
-      sample[current_2].counter = sample_counter-2;
+      setSampleData(&sample_buffer[current_2].XL, XL_X_2, XL_Y_2, XL_Z_2, imu->fullRange_XL, sample_buffer[current_3].XL.valid);
+      sample_buffer[current_2].counter = sample_counter-2;
 
       extend5bits(word[FIFO_DATA_OUT_Y_H], word[FIFO_DATA_OUT_Y_L], dx, dy, dz);
       int16_t XL_X_1 = XL_X_2 + dx;
       int16_t XL_Y_1 = XL_Y_2 + dy;
       int16_t XL_Z_1 = XL_Z_2 + dz;
       // Note that TAGCNT-1 sample's validity depends on TAGCNT-2 sample's validity
-      setSampleData(sample[current_1].XL, XL_X_1, XL_Y_1, XL_Z_1, imu->fullRange_XL, sample[current_2].XL.valid);
-      sample[current_1].counter = sample_counter-1;
+      setSampleData(&sample_buffer[current_1].XL, XL_X_1, XL_Y_1, XL_Z_1, imu->fullRange_XL, sample_buffer[current_2].XL.valid);
+      sample_buffer[current_1].counter = sample_counter-1;
 
       extend5bits(word[FIFO_DATA_OUT_Z_H], word[FIFO_DATA_OUT_Z_L], dx, dy, dz);
       int16_t XL_X = XL_X_1 + dx;
       int16_t XL_Y = XL_Y_1 + dy;
       int16_t XL_Z = XL_Z_1 + dz;
       // Note that TAGCNT sample's validity depends on TAGCNT-1 sample's validity
-      setSampleData(sample[current].XL, XL_X, XL_Y, XL_Z, imu->fullRange_XL, sample[current_1].XL.valid);
-      sample[current].counter = sample_counter;
+      setSampleData(&sample_buffer[current].XL, XL_X, XL_Y, XL_Z, imu->fullRange_XL, sample_buffer[current_1].XL.valid);
+      sample_buffer[current].counter = sample_counter;
       break;
     }
 
     case 0x0A: // Gyroscope NC_T_2 Main Gyroscope uncompressed data batched at two times the previous time slot
     {
-      setSampleData(sample[current_2].G,
+      setSampleData(&sample_buffer[current_2].G,
                     bytesToInt16(word[FIFO_DATA_OUT_X_H], word[FIFO_DATA_OUT_X_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Y_H], word[FIFO_DATA_OUT_Y_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Z_H], word[FIFO_DATA_OUT_Z_L]),
                     imu->fullRange_G, true);
-      sample[current_2].counter = sample_counter-2; // Necessary if XL is not recorded in FIFO
+      sample_buffer[current_2].counter = sample_counter-2; // Necessary if XL is not recorded in FIFO
       break;    
     }
 
     case 0x0B: // Gyroscope NC_T_1 Main Gyroscope uncompressed data batched at the previous time slot
     {
-      setSampleData(sample[current_1].G,
+      setSampleData(&sample_buffer[current_1].G,
                     bytesToInt16(word[FIFO_DATA_OUT_X_H], word[FIFO_DATA_OUT_X_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Y_H], word[FIFO_DATA_OUT_Y_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Z_H], word[FIFO_DATA_OUT_Z_L]),
                     imu->fullRange_G, true);
-      sample[current_1].counter = sample_counter-1; // Necessary if XL is not recorded in FIFO
+      sample_buffer[current_1].counter = sample_counter-1; // Necessary if XL is not recorded in FIFO
       break;
     }
 
     case 0x0C: // Gyroscope 2xC Main Gyroscope 2x compressed data
     {
-      int16_t G_X_2 = sample[current_3].G.rawXYZ[X_IDX] + signextend<8>(word[FIFO_DATA_OUT_X_L]);
-      int16_t G_Y_2 = sample[current_3].G.rawXYZ[Y_IDX] + signextend<8>(word[FIFO_DATA_OUT_X_H]);
-      int16_t G_Z_2 = sample[current_3].G.rawXYZ[Z_IDX] + signextend<8>(word[FIFO_DATA_OUT_Y_L]);
+      int16_t G_X_2 = sample_buffer[current_3].G.rawXYZ[X_IDX] + signextend<8>(word[FIFO_DATA_OUT_X_L]);
+      int16_t G_Y_2 = sample_buffer[current_3].G.rawXYZ[Y_IDX] + signextend<8>(word[FIFO_DATA_OUT_X_H]);
+      int16_t G_Z_2 = sample_buffer[current_3].G.rawXYZ[Z_IDX] + signextend<8>(word[FIFO_DATA_OUT_Y_L]);
       // Note that TAGCNT-2 sample's validity depends on the old TAGCNT-3 sample's validity
-      setSampleData(sample[current_2].G, G_X_2, G_Y_2, G_Z_2, imu->fullRange_G, sample[current_3].G.valid);
-      sample[current_2].counter = sample_counter-2;  // Necessary if XL is not recorded in FIFO
+      setSampleData(&sample_buffer[current_2].G, G_X_2, G_Y_2, G_Z_2, imu->fullRange_G, sample_buffer[current_3].G.valid);
+      sample_buffer[current_2].counter = sample_counter-2;  // Necessary if XL is not recorded in FIFO
 
       int16_t G_X_1 = G_X_2 + signextend<8>(word[FIFO_DATA_OUT_Y_H]);
       int16_t G_Y_1 = G_Y_2 + signextend<8>(word[FIFO_DATA_OUT_Z_L]);
       int16_t G_Z_1 = G_Z_2 + signextend<8>(word[FIFO_DATA_OUT_Z_H]);
       // Note that TAGCNT-1 sample's validity depends on TAGCNT-2 sample's validity
-      setSampleData(sample[current_1].G, G_X_1, G_Y_1, G_Z_1, imu->fullRange_G, sample[current_2].G.valid);
-      sample[current_1].counter = sample_counter-1;  // Necessary if XL is not recorded in FIFO
+      setSampleData(&sample_buffer[current_1].G, G_X_1, G_Y_1, G_Z_1, imu->fullRange_G, sample_buffer[current_2].G.valid);
+      sample_buffer[current_1].counter = sample_counter-1;  // Necessary if XL is not recorded in FIFO
       break;
     }
 
@@ -630,28 +603,28 @@ DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
       int16_t dx, dy, dz;
 
       extend5bits(word[FIFO_DATA_OUT_X_H], word[FIFO_DATA_OUT_X_L], dx, dy, dz);
-      int16_t G_X_2 = sample[current_3].G.rawXYZ[X_IDX] + dx;
-      int16_t G_Y_2 = sample[current_3].G.rawXYZ[Y_IDX] + dy;
-      int16_t G_Z_2 = sample[current_3].G.rawXYZ[Z_IDX] + dz;
+      int16_t G_X_2 = sample_buffer[current_3].G.rawXYZ[X_IDX] + dx;
+      int16_t G_Y_2 = sample_buffer[current_3].G.rawXYZ[Y_IDX] + dy;
+      int16_t G_Z_2 = sample_buffer[current_3].G.rawXYZ[Z_IDX] + dz;
       // Note that TAGCNT-2 sample's validity depends on the old TAGCNT-3 sample's validity
-      setSampleData(sample[current_2].G, G_X_2, G_Y_2, G_Z_2, imu->fullRange_G, sample[current_3].G.valid);
-      sample[current_2].counter = sample_counter-2; // Necessary if XL is not recorded in FIFO
+      setSampleData(&sample_buffer[current_2].G, G_X_2, G_Y_2, G_Z_2, imu->fullRange_G, sample_buffer[current_3].G.valid);
+      sample_buffer[current_2].counter = sample_counter-2; // Necessary if XL is not recorded in FIFO
 
       extend5bits(word[FIFO_DATA_OUT_Y_H], word[FIFO_DATA_OUT_Y_L], dx, dy, dz);
       int16_t G_X_1 = G_X_2 + dx;
       int16_t G_Y_1 = G_Y_2 + dy;
       int16_t G_Z_1 = G_Z_2 + dz;
       // Note that TAGCNT-1 sample's validity depends on TAGCNT-2 sample's validity
-      setSampleData(sample[current_1].G, G_X_1, G_Y_1, G_Z_1, imu->fullRange_G, sample[current_2].G.valid);
-      sample[current_1].counter = sample_counter-1;
+      setSampleData(&sample_buffer[current_1].G, G_X_1, G_Y_1, G_Z_1, imu->fullRange_G, sample_buffer[current_2].G.valid);
+      sample_buffer[current_1].counter = sample_counter-1;
 
       extend5bits(word[FIFO_DATA_OUT_Z_H], word[FIFO_DATA_OUT_Z_L], dx, dy, dz);
       int16_t G_X = G_X_1 + dx;
       int16_t G_Y = G_Y_1 + dy;
       int16_t G_Z = G_Z_1 + dz;
       // Note that TAGCNT sample's validity depends on TAGCNT-1 sample's validity
-      setSampleData(sample[current].G, G_X, G_Y, G_Z, imu->fullRange_G, sample[current_1].G.valid);
-      sample[current].counter = sample_counter;
+      setSampleData(&sample_buffer[current].G, G_X, G_Y, G_Z, imu->fullRange_G, sample_buffer[current_1].G.valid);
+      sample_buffer[current].counter = sample_counter;
       break;
     }
 
@@ -693,40 +666,40 @@ inline void LSM6DSOXFIFOClass::extend5bits(uint8_t hi, uint8_t lo,
   delta_z = signextend<5>((hi & 0x7C) >> 2);
 }
 
-void LSM6DSOXFIFOClass::setSampleData(SampleData &s, 
+void LSM6DSOXFIFOClass::setSampleData(SampleData *s, 
                                       int16_t X, 
                                       int16_t Y, 
                                       int16_t Z, 
                                       uint16_t fullRange,
                                       bool valid)
 {
-  s.rawXYZ[X_IDX] = X;
-  s.rawXYZ[Y_IDX] = Y;
-  s.rawXYZ[Z_IDX] = Z;
-  s.fullRange = fullRange;
+  s->rawXYZ[X_IDX] = X;
+  s->rawXYZ[Y_IDX] = Y;
+  s->rawXYZ[Z_IDX] = Z;
+  s->fullRange = fullRange;
 
-  s.valid = valid;
+  s->valid = valid;
   if(valid) {
     float scale = fullRange * (1.0 / 32768);
-    s.XYZ[X_IDX] = X * scale;
-    s.XYZ[Y_IDX] = Y * scale;
-    s.XYZ[Z_IDX] = Z * scale;
+    s->XYZ[X_IDX] = X * scale;
+    s->XYZ[Y_IDX] = Y * scale;
+    s->XYZ[Z_IDX] = Z * scale;
   } else {
     // Data is invalid (or undefined)
-    s.XYZ[X_IDX] = NAN;
-    s.XYZ[Y_IDX] = NAN;
-    s.XYZ[Z_IDX] = NAN;
+    s->XYZ[X_IDX] = NAN;
+    s->XYZ[Y_IDX] = NAN;
+    s->XYZ[Z_IDX] = NAN;
   }
 }
 
 void LSM6DSOXFIFOClass::initializeSample(uint8_t idx, bool setStatusInvalid)
 {
   // timestamp and temperature are not always sent
-  sample[idx].timestamp = NAN;
-  sample[idx].temperature = NAN;
+  sample_buffer[idx].timestamp = NAN;
+  sample_buffer[idx].temperature = NAN;
 
   // Set counter to 'impossible' value to help identify errors
-  sample[idx].counter = counter_uninitialized;
+  sample_buffer[idx].counter = counter_uninitialized;
 
   // If compression is disabled, XL and G data may be
   // set to remarkable values in order to signal errors.
@@ -735,32 +708,34 @@ void LSM6DSOXFIFOClass::initializeSample(uint8_t idx, bool setStatusInvalid)
   if(!compression_enabled) {
     int16_t default_value = 0x7FFF;
 
-    bool valid_XL = sample[idx].XL.valid & !setStatusInvalid;
-    setSampleData(sample[idx].XL, default_value, default_value, default_value, 0, valid_XL);
-    sample[idx].XL.XYZ[X_IDX] = NAN;
-    sample[idx].XL.XYZ[Y_IDX] = NAN;
-    sample[idx].XL.XYZ[Z_IDX] = NAN;
+    bool valid_XL = sample_buffer[idx].XL.valid & !setStatusInvalid;
+    setSampleData(&sample_buffer[idx].XL, default_value, default_value, default_value, 0, valid_XL);
+    sample_buffer[idx].XL.XYZ[X_IDX] = NAN;
+    sample_buffer[idx].XL.XYZ[Y_IDX] = NAN;
+    sample_buffer[idx].XL.XYZ[Z_IDX] = NAN;
 
-    bool valid_G = sample[idx].G.valid & !setStatusInvalid;
-    setSampleData(sample[idx].G, default_value, default_value, default_value, 0, valid_G);
-    sample[idx].G.XYZ[X_IDX] = NAN;
-    sample[idx].G.XYZ[Y_IDX] = NAN;
-    sample[idx].G.XYZ[Z_IDX] = NAN;
+    bool valid_G = sample_buffer[idx].G.valid & !setStatusInvalid;
+    setSampleData(&sample_buffer[idx].G, default_value, default_value, default_value, 0, valid_G);
+    sample_buffer[idx].G.XYZ[X_IDX] = NAN;
+    sample_buffer[idx].G.XYZ[Y_IDX] = NAN;
+    sample_buffer[idx].G.XYZ[Z_IDX] = NAN;
   }
 }
 
 void LSM6DSOXFIFOClass::invalidateSample(uint8_t idx)
 {
-  setSampleData(sample[idx].XL,
-                sample[idx].XL.rawXYZ[X_IDX],
-                sample[idx].XL.rawXYZ[Y_IDX], 
-                sample[idx].XL.rawXYZ[Z_IDX], 
-                sample[idx].XL.fullRange, false);
-  setSampleData(sample[idx].G,
-                sample[idx].G.rawXYZ[X_IDX],
-                sample[idx].G.rawXYZ[Y_IDX], 
-                sample[idx].G.rawXYZ[Z_IDX], 
-                sample[idx].G.fullRange, false);
+  SampleData *XL = &sample_buffer[idx].XL;
+  setSampleData(XL,
+                XL->rawXYZ[X_IDX],
+                XL->rawXYZ[Y_IDX], 
+                XL->rawXYZ[Z_IDX], 
+                XL->fullRange, false);
+  SampleData *G = &sample_buffer[idx].G;
+  setSampleData(G,
+                G->rawXYZ[X_IDX],
+                G->rawXYZ[Y_IDX], 
+                G->rawXYZ[Z_IDX], 
+                G->fullRange, false);
 }
 
 /*/ For debugging purposes

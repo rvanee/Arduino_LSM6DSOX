@@ -23,17 +23,18 @@
 #include <Arduino.h>
 #include <limits>
 #include "TimestampEstimator.h"
-#include <eventqueue.h>
+
 
 // I2C buffer size is limited to 32 bytes, see link below.
 // https://reference.arduino.cc/reference/en/language/functions/communication/wire/
-#define I2C_BUFFER_LENGTH           32
-#define READ_MAX_WORDS              (I2C_BUFFER_LENGTH / BUFFER_BYTES_PER_WORD)
+#define I2C_BUFFER_LENGTH     32
+#define READ_MAX_WORDS        (I2C_BUFFER_LENGTH / BUFFER_BYTES_PER_WORD)
 
 #define BUFFER_WORDS          READ_MAX_WORDS  // IMU 'word' buffer size
 #define BUFFER_BYTES_PER_WORD 7               // Tag + 3 * (2 byte word)
-#define SAMPLE_BUFFER_SIZE    4               // Should be a power of 2
+#define SAMPLE_BUFFER_SIZE    16              // Should be a power of 2
 #define SAMPLE_BUFFER_MASK    (SAMPLE_BUFFER_SIZE-1)
+#define SAMPLE_TAGCNT_MASK    3               // TAGCNT is 2 bits wide
 
 #define FIFO_DATA_OUT_TAG     0
 #define FIFO_DATA_OUT_X_L     1
@@ -157,32 +158,24 @@ class LSM6DSOXFIFOClass {
     int             readStatus(FIFOStatus& status);
     ReadResult      fillQueue();
 
-    bool            retrieveSample(Sample& sample) {
-      return sampleQueue.getQ(sample);
-    }
+    bool            retrieveSample(Sample& sample);
 
   private:   
-    void            updateSampleCounter(uint8_t tagcnt);
-    bool            releaseSample(Sample& extracted_sample);
     DecodeTagResult decodeWord(uint8_t *word);
   
     void            extend5bits(uint8_t hi, uint8_t lo, int16_t &delta_x, int16_t &delta_y, int16_t &delta_z);
-    inline uint8_t* buffer_pointer(uint16_t idx) {
-      return &buffer[idx * BUFFER_BYTES_PER_WORD];
-    }
 
-    void            setSampleData(SampleData &s, int16_t X, int16_t Y, int16_t Z, uint16_t fullRange, bool valid);
+    void            setSampleData(SampleData *s, int16_t X, int16_t Y, int16_t Z, uint16_t fullRange, bool valid);
     void            initializeSample(uint8_t idx, bool setStatusInvalid = false);
     void            invalidateSample(uint8_t idx);
 
   private:   
     LSM6DSOXClass*  imu;
-    EventQueue<Sample, SAMPLE_BUFFER_SIZE> sampleQueue;
 
     // Sample buffer (management)
-    Sample          sample[SAMPLE_BUFFER_SIZE]; // Ring buffer, contains the words at T-3, T-2, T-1 and T
-    uint32_t        sample_counter;
-    uint32_t        to_release_counter;
+    Sample          sample_buffer[SAMPLE_BUFFER_SIZE];
+    uint32_t        sample_counter; // Actual sample number. Lowest 2 bits resemble TAGCNT
+    uint32_t        read_counter;   // First finished sample number that is not yet read
 
     // Timestamp (reconstruction)
     uint64_t        timestamp64;
@@ -192,12 +185,7 @@ class LSM6DSOXFIFOClass {
 
     // MCU timestamp estimation
     TimestampEstimator MCU_timestamp_estimator;
-
-    // Data buffer (management)
-    uint8_t         buffer[BUFFER_WORDS * BUFFER_BYTES_PER_WORD];
-    uint16_t        read_idx;
-    uint16_t        write_idx;
-    bool            buffer_empty;
+    bool            use_MCU_timestamp;
 
     bool            compression_enabled;
     bool            timestamp_reconstruction_enabled;

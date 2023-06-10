@@ -68,6 +68,7 @@ uint32_t prev_counter;
 
 unsigned long XL_invalid;
 unsigned long G_invalid;
+unsigned long num_errors;
 
 void setup() {
   Serial.begin(115200);
@@ -101,10 +102,11 @@ void setup() {
   IMU.fifo.settings.BDR_temperature = 52;
   IMU.fifo.begin();
   
-  prev_counter = IMU.fifo.counter_uninitialized;
+  prev_counter = 0;
 
   XL_invalid = 0;
   G_invalid = 0;
+  num_errors = 0;
 
   lasttime = millis();
 }
@@ -148,10 +150,11 @@ void loop() {
 
   Sample sample;
   if(IMU.fifo.retrieveSample(sample)) {
-    if(prev_counter != IMU.fifo.counter_uninitialized) {
+    if(prev_counter != 0) {
       if(sample.counter != (prev_counter+1))
       {
-        Serial.println("Counter error while reading from IMU!");
+        Serial.println("Counter error: counter="+String(sample.counter)+", prev="+String(prev_counter));
+        num_errors++;
         // Go on, this may happen when problems occur with
         // the tag byte during decode
       }
@@ -185,6 +188,7 @@ void loop() {
   int currenttime = millis();
   int deltat = currenttime - lasttime;
   if(deltat > REPORT_INTERVAL) {
+    IMU.fifo.end(); // Stop fifo queuing: reporting will take some time
     lasttime = currenttime;
 
     // Display timing information + bookkeeping
@@ -202,8 +206,10 @@ void loop() {
     // Invalid XL/G measurements
     Serial.println("# invalid XL samples = "+String(XL_invalid));
     Serial.println("# invalid G  samples = "+String(G_invalid));
+    Serial.println("# errors = "+String(num_errors));
     XL_invalid = 0;
     G_invalid = 0;
+    // Do not reset num_errors, in order to increase test coverage
 
     // Display temperature information + bookkeeping
     Serial.println("Tavg = "+String(temperature.mean())+" (std="+
@@ -225,5 +231,9 @@ void loop() {
     }
 
     Serial.println("---");
+
+    // Restart FIFO
+    IMU.fifo.begin();
+    prev_counter = 0;
   } // END if(deltat > REPORT_INTERVAL)
 } // END void loop()

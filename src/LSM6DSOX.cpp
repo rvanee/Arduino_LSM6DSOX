@@ -89,13 +89,13 @@ LSM6DSOXClass::LSM6DSOXClass(TwoWire& wire, uint8_t slaveAddress) :
   _wire(&wire),
   _spi(NULL),
   _slaveAddress(slaveAddress),
-  _internalFrequencyFactor(25E-6)
+  internalFrequencyFactor(25E-6)
 {
   initializeSettings();
 
   // Full range not yet defined
-  fullRange_XL = NAN;
-  fullRange_G = NAN;
+  fullRange_XL = 0;
+  fullRange_G = 0;
 }
 
 LSM6DSOXClass::LSM6DSOXClass(SPIClass& spi, int csPin, int irqPin) :
@@ -105,13 +105,13 @@ LSM6DSOXClass::LSM6DSOXClass(SPIClass& spi, int csPin, int irqPin) :
   _csPin(csPin),
   _irqPin(irqPin),
   _spiSettings(10E6, MSBFIRST, SPI_MODE0),
-  _internalFrequencyFactor(25E-6)
+  internalFrequencyFactor(25E-6)
 {
   initializeSettings();
 
   // Full range not yet defined
-  fullRange_XL = NAN;
-  fullRange_G = NAN;
+  fullRange_XL = 0;
+  fullRange_G = 0;
 }
 
 LSM6DSOXClass::~LSM6DSOXClass()
@@ -196,7 +196,7 @@ int LSM6DSOXClass::begin()
     // 8-bit 2's complement
     int freq_fine = (result & 0x80) ? result - 256 : result;
     // See AN5272, par 6.4
-    _internalFrequencyFactor = 1 / (40000 * (1 + (0.0015 * freq_fine)));
+    internalFrequencyFactor = 1 / (40000 * (1 + (0.0015 * freq_fine)));
     result = 1;
   }
 
@@ -325,7 +325,7 @@ int LSM6DSOXClass::setFullRange_XL(float range)
   int result = readModifyWriteRegister(LSM6DSOX_CTRL1_XL, fr_bits << 2, MASK_FR_XL);
   if(result > 0) {
     // Store selected full range
-    fullRange_XL = LSM6DSOXTables::getFloatFromBits(fr_bits, LSM6DSOXTables::FR_XL_bits);
+    fullRange_XL = (uint16_t)(LSM6DSOXTables::getFloatFromBits(fr_bits, LSM6DSOXTables::FR_XL_bits));
   }
   return result;
 }
@@ -339,7 +339,7 @@ int LSM6DSOXClass::setFullRange_G(float range)
   int result = readModifyWriteRegister(LSM6DSOX_CTRL2_G, fr_bits << 1, MASK_FR_G);
   if(result > 0) {
     // Store selected full range
-    fullRange_G = LSM6DSOXTables::getFloatFromBits(fr_bits, LSM6DSOXTables::FR_G_bits);
+    fullRange_G = (uint16_t)(LSM6DSOXTables::getFloatFromBits(fr_bits, LSM6DSOXTables::FR_G_bits));
   }
   return result;
 }
@@ -408,9 +408,10 @@ int LSM6DSOXClass::readAcceleration(float& x, float& y, float& z)
     return 0;
   }
 
-  x = data[0] * fullRange_XL / 32768.0;
-  y = data[1] * fullRange_XL / 32768.0;
-  z = data[2] * fullRange_XL / 32768.0;
+  float range_factor = fullRange_XL / 32768.0;
+  x = data[0] * range_factor;
+  y = data[1] * range_factor;
+  z = data[2] * range_factor;
 
   return 1;
 }
@@ -459,9 +460,10 @@ int LSM6DSOXClass::readGyroscope(float& x, float& y, float& z)
     return 0;
   }
 
-  x = data[0] * fullRange_G / 32768.0;
-  y = data[1] * fullRange_G / 32768.0;
-  z = data[2] * fullRange_G / 32768.0;
+  float range_factor = fullRange_G / 32768.0;
+  x = data[0] * range_factor;
+  y = data[1] * range_factor;
+  z = data[2] * range_factor;
 
   return 1;
 }
@@ -547,7 +549,7 @@ int LSM6DSOXClass::readTimestampDouble(double& timestamp) {
   int result = readTimestamp(t);
   if(result == 1) {
     // See AN5272, par 6.4
-    timestamp = t * _internalFrequencyFactor;
+    timestamp = t * internalFrequencyFactor;
   }
   return result;
 }

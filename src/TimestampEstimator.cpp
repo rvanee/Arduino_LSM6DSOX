@@ -19,7 +19,7 @@
 */
 
 #include "TimestampEstimator.h"
-#include <assert.h>
+#include <algorithm>
 
 
 TimestampEstimator::TimestampEstimator() {
@@ -33,6 +33,10 @@ void TimestampEstimator::reset(uint32_t MCU_micros_init)
 {
     N = 0;
     buf_idx = 0;
+
+    // Reset buffers
+    std::fill(IMU_delta_counter, IMU_delta_counter+TIMESTAMP_BUFFER_SIZE, 0);
+    std::fill(MCU_delta_timestamp, MCU_delta_timestamp+TIMESTAMP_BUFFER_SIZE, 0);
 
     // IMU sample counter variables
     IMU_sum = 0;
@@ -77,22 +81,18 @@ void TimestampEstimator::add(uint32_t IMU_counter, uint32_t MCU_micros)
   uint32_t normalized_delta_IMU = IMU_counter - IMU_ref;
   uint32_t normalized_delta_MCU = MCU_micros - (uint32_t)MCU_ref;
 
-  if(N < TIMESTAMP_BUFFER_SIZE) { // Still filling the buffer (at startup)?
-    // Subtract the old deltas from the sums.
-    // This will keep the sums relatively small, preventing overflow.
-    IMU_sum_sq  += N*delta_IMU_0*delta_IMU_0 - 2*IMU_sum*delta_IMU_0;
-    MCU_sum_IMU += N*delta_IMU_0*delta_MCU_0 - IMU_sum*delta_MCU_0 - MCU_sum*delta_IMU_0;
-    IMU_sum -= N*delta_IMU_0;
-    MCU_sum -= N*delta_MCU_0;
+  // Add 'normalized' new data to sums
+  uint32_t old_IMU_sum = IMU_sum;
+  unsigned long long old_MCU_sum = MCU_sum;
+  IMU_sum += normalized_delta_IMU;
+  IMU_sum_sq += normalized_delta_IMU*normalized_delta_IMU;
+  MCU_sum += normalized_delta_MCU;
+  MCU_sum_IMU += normalized_delta_IMU*normalized_delta_MCU;
 
-    // Add 'normalized' new data to sums
-    IMU_sum += normalized_delta_IMU;
-    IMU_sum_sq += normalized_delta_IMU*normalized_delta_IMU;
-    MCU_sum += normalized_delta_MCU;
-    MCU_sum_IMU += normalized_delta_IMU*normalized_delta_MCU;
+  if(N < TIMESTAMP_BUFFER_SIZE) { // Still filling the buffer (at startup)?
     N++;
 
-    // Calculate b as a scaled 64 bit signed long long int
+    // Calculate b as a scaled 64 bit unsigned long long int
     uint32_t b_denominator = N*IMU_sum_sq - IMU_sum*IMU_sum;
     if(b_denominator > 0) {
       unsigned long long b_numerator = (N*MCU_sum_IMU - IMU_sum*MCU_sum) << TIMESTAMP_BSCALE_POWER2;
@@ -103,18 +103,12 @@ void TimestampEstimator::add(uint32_t IMU_counter, uint32_t MCU_micros)
    } else {
     // Subtract the old deltas from the sums.
     // This will keep the sums relatively small, preventing overflow.
-    IMU_sum_sq  += ((delta_IMU_0*delta_IMU_0) << TIMESTAMP_BUFFER_POWER2) - 2*IMU_sum*delta_IMU_0;
-    MCU_sum_IMU += ((delta_IMU_0*delta_MCU_0) << TIMESTAMP_BUFFER_POWER2) - IMU_sum*delta_MCU_0 - MCU_sum*delta_IMU_0;
+    IMU_sum_sq  += ((delta_IMU_0*delta_IMU_0) << TIMESTAMP_BUFFER_POWER2) - 2*old_IMU_sum*delta_IMU_0;
+    MCU_sum_IMU += ((delta_IMU_0*delta_MCU_0) << TIMESTAMP_BUFFER_POWER2) - old_IMU_sum*delta_MCU_0 - old_MCU_sum*delta_IMU_0;
     IMU_sum -= delta_IMU_0 << TIMESTAMP_BUFFER_POWER2;
     MCU_sum -= delta_MCU_0 << TIMESTAMP_BUFFER_POWER2;
-
-    // Add 'normalized' new data to sums
-    IMU_sum += normalized_delta_IMU;
-    IMU_sum_sq += normalized_delta_IMU*normalized_delta_IMU;
-    MCU_sum += normalized_delta_MCU;
-    MCU_sum_IMU += normalized_delta_IMU*normalized_delta_MCU;
   
-    // Calculate b as a scaled 64 bit signed int
+    // Calculate b as a scaled 64 bit unsigned int
     unsigned long long b_numerator = ((MCU_sum_IMU << TIMESTAMP_BUFFER_POWER2) - IMU_sum*MCU_sum) << TIMESTAMP_BSCALE_POWER2;
     uint32_t b_denominator = (IMU_sum_sq  << TIMESTAMP_BUFFER_POWER2) - IMU_sum*IMU_sum;
     b_scaled = b_numerator / b_denominator;

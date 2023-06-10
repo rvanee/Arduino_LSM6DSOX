@@ -123,8 +123,8 @@ class LSM6DSOXClass {
     LSM6DSOXFIFOClass fifo;
 
     // Actual full range values. These are updated upon each configuration change
-    float fullRange_XL;
-    float fullRange_G;
+    uint16_t fullRange_XL;
+    uint16_t fullRange_G;
 
   private:
     int readRegister(uint8_t address);
@@ -143,7 +143,7 @@ class LSM6DSOXClass {
 
     SPISettings _spiSettings;
 
-    float _internalFrequencyFactor;
+    float internalFrequencyFactor;
 };
 
 extern LSM6DSOXClass IMU_LSM6DSOX;
