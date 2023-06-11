@@ -77,12 +77,12 @@ void setup() {
 
   IMU.settings.i2c_frequency = 400000;
   IMU.settings.powerMode_XL = XL_POWER_MODE_HP;
-  IMU.settings.ODR_XL = ODR_ALL;//6667;
-  //IMU.settings.cutoff_LPF2_XL = 800;
+  IMU.settings.ODR_XL = ODR_ALL;
+  //IMU.settings.cutoff_LPF2_XL = 400;
   IMU.settings.fullRange_XL = 2;
   IMU.settings.powerMode_G = G_POWER_MODE_HP;
-  IMU.settings.ODR_G = ODR_ALL;//6667;
-  //IMU.settings.cutoff_LPF1_G = 609;
+  IMU.settings.ODR_G = ODR_ALL;
+  //IMU.settings.cutoff_LPF1_G = 416;
   IMU.settings.fullRange_G = 125;
   if (!IMU.begin()) {
     Serial.println("Failed to initialize IMU!");
@@ -96,8 +96,8 @@ void setup() {
   IMU.resetTimestamp();
 
   IMU.fifo.settings.compression = true;
-  IMU.fifo.settings.BDR_XL = ODR_ALL;//1667;
-  IMU.fifo.settings.BDR_G = ODR_ALL;//1667;
+  IMU.fifo.settings.BDR_XL = ODR_ALL;
+  IMU.fifo.settings.BDR_G = ODR_ALL;
   IMU.fifo.settings.timestamp_decimation = 8;
   IMU.fifo.settings.BDR_temperature = 52;
   IMU.fifo.begin();
@@ -149,7 +149,7 @@ void loop() {
   }
 
   Sample sample;
-  if(IMU.fifo.retrieveSample(sample)) {
+  while(IMU.fifo.retrieveSample(sample)) {
     if(prev_counter != 0) {
       if(sample.counter != (prev_counter+1))
       {
@@ -173,16 +173,16 @@ void loop() {
     // Update XL X/Y/Z statistics
     if(!isnan(sample.XL.XYZ[0])) {
       for(int ixl=0; ixl<3; ixl++) { // Iterate through X/Y/Z
-        XL[ixl].add(sample.XL.XYZ[ixl]);
+        XL[ixl].add((1.0/65536)*sample.XL.XYZ[ixl]);
       }
     }
     // Update G X/Y/Z statistics
     if(!isnan(sample.G.XYZ[0])) {
       for(int ig=0; ig<3; ig++) { // Iterate through X/Y/Z
-        G[ig].add(sample.G.XYZ[ig]);
+        G[ig].add((1.0/65536)*sample.G.XYZ[ig]);
       }
     }
-  } // END if(retrieveSample(sample))
+  } // END while(retrieveSample(sample))
 
   // Reporting
   int currenttime = millis();

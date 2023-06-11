@@ -83,13 +83,16 @@
 #define MASK_HPCF_XL                0xE0  // CTRL8_XL
 #define MASK_TIMESTAMP_EN           0x20  // CTRL10_C
 
+#define INTERNALFREQFACTOR_SHIFT    11
+#define INTERNALFREQFACTOR_DEFAULT  ((1000000UL << INTERNALFREQFACTOR_SHIFT) / 40000)
+
 
 LSM6DSOXClass::LSM6DSOXClass(TwoWire& wire, uint8_t slaveAddress) :
   fifo(this),
   _wire(&wire),
   _spi(NULL),
   _slaveAddress(slaveAddress),
-  internalFrequencyFactor(25E-6)
+  internalFrequencyFactor(INTERNALFREQFACTOR_DEFAULT)
 {
   initializeSettings();
 
@@ -105,7 +108,7 @@ LSM6DSOXClass::LSM6DSOXClass(SPIClass& spi, int csPin, int irqPin) :
   _csPin(csPin),
   _irqPin(irqPin),
   _spiSettings(10E6, MSBFIRST, SPI_MODE0),
-  internalFrequencyFactor(25E-6)
+  internalFrequencyFactor(INTERNALFREQFACTOR_DEFAULT)
 {
   initializeSettings();
 
@@ -194,9 +197,15 @@ int LSM6DSOXClass::begin()
   result = readRegister(LSM6DSOX_INTERNAL_FREQ_FINE);
   if(result >= 0) {
     // 8-bit 2's complement
-    int freq_fine = (result & 0x80) ? result - 256 : result;
+    int8_t freq_fine = (result & 0x80) ? result - 256 : result;
     // See AN5272, par 6.4
-    internalFrequencyFactor = 1 / (40000 * (1 + (0.0015 * freq_fine)));
+    // Note that range divisor = [40000-60*128, 40000+60*127]
+    uint16_t divisor = 40000 + 60*freq_fine;
+    // Fixed point factor. Note that 1000000*2^11 / divisor above will
+    // yield a range of [43007, 63366], fitting a uint16_t.
+    // Multiply the timestamp (in units of 25us) with this factor and
+    // divide it by 2^11, and the corrected timestamp in us is found.
+    internalFrequencyFactor = (1000000UL << INTERNALFREQFACTOR_SHIFT) / divisor;
     result = 1;
   }
 
@@ -408,7 +417,7 @@ int LSM6DSOXClass::readAcceleration(float& x, float& y, float& z)
     return 0;
   }
 
-  float range_factor = fullRange_XL / 32768.0;
+  float range_factor = fullRange_XL * (1.0 / 32768);
   x = data[0] * range_factor;
   y = data[1] * range_factor;
   z = data[2] * range_factor;
@@ -460,7 +469,7 @@ int LSM6DSOXClass::readGyroscope(float& x, float& y, float& z)
     return 0;
   }
 
-  float range_factor = fullRange_G / 32768.0;
+  float range_factor = fullRange_G * (1.0 / 32768);
   x = data[0] * range_factor;
   y = data[1] * range_factor;
   z = data[2] * range_factor;
@@ -539,7 +548,7 @@ int LSM6DSOXClass::readTimestamp(uint32_t& timestamp) {
     timestamp = (((uint32_t)buffer[3]) << 24) | 
                 (((uint32_t)buffer[2]) << 16) |
                 (((uint32_t)buffer[1]) <<  8) |
-                 ((uint32_t)buffer[0]);
+                buffer[0];
   }
   return result;
 }
@@ -548,8 +557,7 @@ int LSM6DSOXClass::readTimestampDouble(double& timestamp) {
   uint32_t t;
   int result = readTimestamp(t);
   if(result == 1) {
-    // See AN5272, par 6.4
-    timestamp = t * internalFrequencyFactor;
+    timestamp = correctTimestamp(t);
   }
   return result;
 }
@@ -557,6 +565,14 @@ int LSM6DSOXClass::readTimestampDouble(double& timestamp) {
 int LSM6DSOXClass::resetTimestamp() {
   // See AN5272, par. 6.4
   return writeRegister(LSM6DSOX_TIMESTAMP2, 0xAA);
+}
+
+unsigned long long LSM6DSOXClass::correctTimestamp(unsigned long long timestamp64)
+{
+  // See AN5272, par 6.4
+  // Multiply the timestamp (in units of 25us) with this factor and
+  // divide it by 2^11, and the corrected timestamp in us is found.
+  return (timestamp64 * internalFrequencyFactor) >> INTERNALFREQFACTOR_SHIFT;
 }
 
 int LSM6DSOXClass::readRegister(uint8_t address)

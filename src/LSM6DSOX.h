@@ -114,6 +114,7 @@ class LSM6DSOXClass {
     int readTimestamp(uint32_t& timestamp);
     int readTimestampDouble(double& timestamp);
     int resetTimestamp();
+    unsigned long long correctTimestamp(unsigned long long timestamp64);
 
   public:
     //IMU settings
@@ -143,7 +144,7 @@ class LSM6DSOXClass {
 
     SPISettings _spiSettings;
 
-    float internalFrequencyFactor;
+    uint16_t internalFrequencyFactor;
 };
 
 extern LSM6DSOXClass IMU_LSM6DSOX;

@@ -44,6 +44,10 @@
 #define FIFO_DATA_OUT_Z_L     5
 #define FIFO_DATA_OUT_Z_H     6
 
+#define FIFO_INT16_NAN        0xFFFF
+#define FIFO_FIXED_POINT_NAN  0xFFFFFFFF
+#define FIFO_ULL_NAN          0xFFFFFFFFFFFFFFFF
+
 enum class ReadResult {
   NO_DATA_AVAILABLE,
   DATA_READ,
@@ -94,7 +98,7 @@ public:
 };
 
 struct SampleData {
-  float XYZ[3];
+  int32_t XYZ[3];       // Fixed point data: decimal point between bits 15 and 16
   int16_t rawXYZ[3];
   uint16_t fullRange;
   bool valid;
@@ -103,9 +107,9 @@ struct SampleData {
 struct Sample {
   SampleData G;
   SampleData XL;
-  double timestamp;     // May be NaN
-  float temperature;    // May be NaN
-  uint32_t counter;     // Lowest 2 bits provided by tag byte (TAG_CNT)
+  unsigned long long timestamp; // Timestamp in microseconds. May be FIFO_ULL_NAN
+  float temperature;            // May be NaN
+  uint32_t counter;             // Lowest 2 bits provided by tag byte (TAG_CNT)
 };
 
 // Utility: sign extension from B bits in 2's complement to int16 
@@ -140,7 +144,7 @@ class LSM6DSOXFIFOClass {
 
       // Compression
       bool      compression = true,       // true = enable compression
-      uint8_t   uncompressed_decimation = 16,// Uncompressed data every 0/8/16/32 batch data
+      uint8_t   uncompressed_decimation = 32,// Uncompressed data every 0/8/16/32 batch data
 
       // Watermarks
       uint16_t  watermark_level = 0,      // 9 bits (0-511)
@@ -181,7 +185,7 @@ class LSM6DSOXFIFOClass {
     uint64_t        timestamp64;
     uint64_t        timestamp64_prev;
     uint32_t        timestamp_counter;
-    double          dt_per_sample;
+    uint16_t        dt_per_sample;
 
     // MCU timestamp estimation
     TimestampEstimator MCU_timestamp_estimator;
@@ -189,18 +193,6 @@ class LSM6DSOXFIFOClass {
 
     bool            compression_enabled;
     bool            timestamp_reconstruction_enabled;
-
-    /*/ For debugging purposes
-    void displaySamples();
-    //*/
-
-  public:
-    // The compression algorithm may set the counter to a value of 32 bit unsigned int max
-    // value -2/-1/-0.
-    // So max uint32 value - 3 is the largest counter value that will not be set by 
-    // the algorithm (at least not until after 1 or more weeks of continuous
-    // sensing, mere milliseconds before overrun to 0).
-    static const uint32_t counter_uninitialized = std::numeric_limits<uint32_t>::max()-3;
 };
 
 #endif // LSM6DSOXFIFO_H

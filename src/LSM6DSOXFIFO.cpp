@@ -202,7 +202,7 @@ void LSM6DSOXFIFOClass::begin()
   timestamp64 = 0;
   timestamp64_prev = 0;
   timestamp_counter = 0;
-  dt_per_sample = NAN;
+  dt_per_sample = FIFO_INT16_NAN;
 
   // If IMU fifo timestamping is disabled, use time stamp estimation
   // using the MCU's micros() clock
@@ -243,7 +243,6 @@ int LSM6DSOXFIFOClass::readStatus(FIFOStatus& status)
 ReadResult LSM6DSOXFIFOClass::fillQueue()
 {
   uint16_t to_read;
-  unsigned long MCU_micros;
   uint8_t status_registers[2];
   int result = imu->readRegisters(LSM6DSOX_STATUS1, status_registers, 2);
     
@@ -252,6 +251,7 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
   // read operation above in order to minimize delay between addition
   // of the last word to the fifo, right before the status registers
   // are read, and obtaining the MCU's microsecond-precision clock.
+  unsigned long MCU_micros = 0; // Initialise it, prevents warning
   if(use_MCU_timestamp) {
      MCU_micros = micros();
   }
@@ -328,15 +328,14 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
           // Reconstruction is only necessary if sample's timestamp undefined...
           if(isnan(finished_sample->timestamp) && 
             // ... and only possible if delta timestamp per sample is known
-            !isnan(dt_per_sample)) {
+            (dt_per_sample != FIFO_INT16_NAN)) {
             // Calculate number of samples between newest timestamp and this sample
-            int delta_samples = (finished_sample->counter > timestamp_counter) ?
+            int32_t delta_samples = (finished_sample->counter > timestamp_counter) ?
               finished_sample->counter - timestamp_counter :
-              -int(timestamp_counter - finished_sample->counter);
+              -int32_t(timestamp_counter - finished_sample->counter);
             // Set sample's timestamp relative to latest timestamp and correct it
-            // TODO use fixed point arithmetic
-            finished_sample->timestamp =
-              imu->internalFrequencyFactor * (timestamp64 + delta_samples*dt_per_sample);
+            finished_sample->timestamp = 
+              imu->correctTimestamp(timestamp64 + delta_samples*dt_per_sample);
           }
         }
       }
@@ -443,7 +442,7 @@ DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
         (((uint32_t)word[FIFO_DATA_OUT_Y_H]) << 24) | 
         (((uint32_t)word[FIFO_DATA_OUT_Y_L]) << 16) |
         (((uint32_t)word[FIFO_DATA_OUT_X_H]) <<  8) |
-         ((uint32_t)word[FIFO_DATA_OUT_X_L]);
+         (          word[FIFO_DATA_OUT_X_L]);
       
       // For timestamp reconstruction:
       // store old timestamp64 value
@@ -462,9 +461,9 @@ DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
 
       // Calculate delta timestamp per sample (used for timestamp reconstruction)
       dt_per_sample = (timestamp_counter == sample_counter) ?
-                      NAN :
-                      double(timestamp64    - timestamp64_prev) / 
-                            (sample_counter - timestamp_counter);
+                      FIFO_INT16_NAN :
+                      uint16_t(timestamp64   - timestamp64_prev) /
+                      uint8_t(sample_counter - timestamp_counter);
 
       // store current sample counter as last timestamp counter
       timestamp_counter = sample_counter;
@@ -680,45 +679,44 @@ void LSM6DSOXFIFOClass::setSampleData(SampleData *s,
 
   s->valid = valid;
   if(valid) {
-    float scale = fullRange * (1.0 / 32768);
-    s->XYZ[X_IDX] = X * scale;
-    s->XYZ[Y_IDX] = Y * scale;
-    s->XYZ[Z_IDX] = Z * scale;
+    s->XYZ[X_IDX] = (int32_t)X * fullRange;
+    s->XYZ[Y_IDX] = (int32_t)Y * fullRange;
+    s->XYZ[Z_IDX] = (int32_t)Z * fullRange;
   } else {
     // Data is invalid (or undefined)
-    s->XYZ[X_IDX] = NAN;
-    s->XYZ[Y_IDX] = NAN;
-    s->XYZ[Z_IDX] = NAN;
+    s->XYZ[X_IDX] = FIFO_FIXED_POINT_NAN;
+    s->XYZ[Y_IDX] = FIFO_FIXED_POINT_NAN;
+    s->XYZ[Z_IDX] = FIFO_FIXED_POINT_NAN;
   }
 }
 
 void LSM6DSOXFIFOClass::initializeSample(uint8_t idx, bool setStatusInvalid)
 {
   // timestamp and temperature are not always sent
-  sample_buffer[idx].timestamp = NAN;
+  sample_buffer[idx].timestamp = FIFO_ULL_NAN;
   sample_buffer[idx].temperature = NAN;
 
   // Set counter to 'impossible' value to help identify errors
-  sample_buffer[idx].counter = counter_uninitialized;
+  sample_buffer[idx].counter = 0;
 
   // If compression is disabled, XL and G data may be
   // set to remarkable values in order to signal errors.
   // If compression is used, older raw values may be
   // used as reference for increments.
   if(!compression_enabled) {
-    int16_t default_value = 0x7FFF;
+    SampleData *XL = &sample_buffer[idx].XL;
+    bool valid_XL = XL->valid & !setStatusInvalid;
+    setSampleData(XL, FIFO_INT16_NAN, FIFO_INT16_NAN, FIFO_INT16_NAN, 0, valid_XL);
+    XL->XYZ[X_IDX] = FIFO_FIXED_POINT_NAN;
+    XL->XYZ[Y_IDX] = FIFO_FIXED_POINT_NAN;
+    XL->XYZ[Z_IDX] = FIFO_FIXED_POINT_NAN;
 
-    bool valid_XL = sample_buffer[idx].XL.valid & !setStatusInvalid;
-    setSampleData(&sample_buffer[idx].XL, default_value, default_value, default_value, 0, valid_XL);
-    sample_buffer[idx].XL.XYZ[X_IDX] = NAN;
-    sample_buffer[idx].XL.XYZ[Y_IDX] = NAN;
-    sample_buffer[idx].XL.XYZ[Z_IDX] = NAN;
-
-    bool valid_G = sample_buffer[idx].G.valid & !setStatusInvalid;
-    setSampleData(&sample_buffer[idx].G, default_value, default_value, default_value, 0, valid_G);
-    sample_buffer[idx].G.XYZ[X_IDX] = NAN;
-    sample_buffer[idx].G.XYZ[Y_IDX] = NAN;
-    sample_buffer[idx].G.XYZ[Z_IDX] = NAN;
+    SampleData *G = &sample_buffer[idx].G;
+    bool valid_G = G->valid & !setStatusInvalid;
+    setSampleData(G, FIFO_INT16_NAN, FIFO_INT16_NAN, FIFO_INT16_NAN, 0, valid_G);
+    G->XYZ[X_IDX] = FIFO_FIXED_POINT_NAN;
+    G->XYZ[Y_IDX] = FIFO_FIXED_POINT_NAN;
+    G->XYZ[Z_IDX] = FIFO_FIXED_POINT_NAN;
   }
 }
 
@@ -737,15 +735,3 @@ void LSM6DSOXFIFOClass::invalidateSample(uint8_t idx)
                 G->rawXYZ[Z_IDX], 
                 G->fullRange, false);
 }
-
-/*/ For debugging purposes
-void LSM6DSOXFIFOClass::displaySamples()
-{
-  Serial.println("---");
-  for(uint8_t idx = 0; idx < SAMPLE_BUFFER_SIZE; idx++) {
-    Serial.print("["+String(idx)+"] cnt= " + String(sample[idx].counter) + " t="+String(sample[idx].timestamp)+" T="+String(sample[idx].temperature));
-    Serial.print(" G=("+String(sample[idx].G_X)+", " + String(sample[idx].G_Y) + ", "+String(sample[idx].G_Z) + ") {FS="+String(sample[idx].fullRange_G)+"}");
-    Serial.println(" XL=("+String(sample[idx].XL_X)+", " + String(sample[idx].XL_Y) + ", "+String(sample[idx].XL_Z) + ") {FS="+String(sample[idx].fullRange_XL)+"}");
-  }
-  Serial.println("---");
-} //*/
