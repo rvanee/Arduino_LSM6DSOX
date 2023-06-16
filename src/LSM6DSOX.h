@@ -47,6 +47,7 @@ public:
   float       ODR_G;
   float       fullRange_XL;
   float       fullRange_G;
+  bool        rad_G;
   float       cutoff_LPF2_XL;
   float       cutoff_LPF1_G;
   float       cutoff_HPF_G;
@@ -69,6 +70,7 @@ class LSM6DSOXClass {
       float ODR_G = 104, 
       float fullRange_XL = 4,
       float fullRange_G = 2000,
+      bool rad_G = false,
       float cutoff_LPF2_XL = 52,
       float cutoff_LPF1_G = 52,
       float cutoff_HPF_G = 0,

@@ -164,12 +164,18 @@ class LSM6DSOXFIFOClass {
 
     bool            retrieveSample(Sample& sample);
 
+    // Utility
+    int32_t         raw2fixedrad(int16_t raw, uint16_t fullRange);
+
   private:   
     DecodeTagResult decodeWord(uint8_t *word);
   
-    void            extend5bits(uint8_t hi, uint8_t lo, int16_t &delta_x, int16_t &delta_y, int16_t &delta_z);
+    void            extend5bits(uint8_t hi, uint8_t lo, 
+                                int16_t &delta_x, int16_t &delta_y, int16_t &delta_z);
 
-    void            setSampleData(SampleData *s, int16_t X, int16_t Y, int16_t Z, uint16_t fullRange, bool valid);
+    void            setSampleData(SampleData *s, 
+                                  int16_t X, int16_t Y, int16_t Z, uint16_t fullRange,
+                                  bool valid, bool to_rad=false);
     void            initializeSample(uint8_t idx, bool setStatusInvalid = false);
     void            invalidateSample(uint8_t idx);
 

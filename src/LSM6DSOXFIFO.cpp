@@ -251,10 +251,11 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
   // read operation above in order to minimize delay between addition
   // of the last word to the fifo, right before the status registers
   // are read, and obtaining the MCU's microsecond-precision clock.
-  unsigned long MCU_micros = 0; // Initialise it, prevents warning
-  if(use_MCU_timestamp) {
-     MCU_micros = micros();
-  }
+  unsigned long MCU_micros = use_MCU_timestamp ? 
+                              micros() :
+                              0; // Initialize to prevent warning
+  // Keep current sample counter, to be used for MCU timestamping
+  uint32_t prev_sample_counter = sample_counter;
 
   // Now process the status data
   if(result != 1) return ReadResult::READ_ERROR;
@@ -278,8 +279,7 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
     to_read -= read_now;
 
     // Process words read above
-    for(uint16_t wordidx = 0; wordidx < read_now; wordidx++) {
-      uint8_t *word = &read_buffer[wordidx * BUFFER_BYTES_PER_WORD];
+    for(uint8_t *word = read_buffer; read_now--; word += BUFFER_BYTES_PER_WORD) {
       uint8_t tag_byte = word[FIFO_DATA_OUT_TAG];
 
       // Perform parity check
@@ -326,7 +326,7 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
           Sample *finished_sample = &sample_buffer[(uint8_t)(release_counter & SAMPLE_BUFFER_MASK)];
 
           // Reconstruction is only necessary if sample's timestamp undefined...
-          if(isnan(finished_sample->timestamp) && 
+          if((finished_sample->timestamp != FIFO_ULL_NAN) && 
             // ... and only possible if delta timestamp per sample is known
             (dt_per_sample != FIFO_INT16_NAN)) {
             // Calculate number of samples between newest timestamp and this sample
@@ -362,8 +362,8 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
           // error in the code logic that we can't
           // recover from
           return ReadResult::LOGIC_ERROR;
-      } 
-    } // END for(uint16_t wordidx = 0...
+      }
+    } // END for(uint8_t *word = &read_buffer; ...
   } while(to_read > 0);
 
   // If MCU timestamps are to be used, they should be
@@ -388,9 +388,9 @@ bool LSM6DSOXFIFOClass::retrieveSample(Sample& sample)
   if((read_counter + delta_cnt) < sample_counter) {
     sample = sample_buffer[(uint8_t)(read_counter & SAMPLE_BUFFER_MASK)];
     read_counter++;
-    return true; // Sample released
+    return true; // Sample retrieved
   }
-  return false; // No sample released
+  return false; // No sample retrieved (buffer empty)
 }
 
 DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
@@ -404,6 +404,9 @@ DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
   uint8_t current_2 = (sample_counter-2) & SAMPLE_BUFFER_MASK; // T-2
   uint8_t current_3 = (sample_counter-3) & SAMPLE_BUFFER_MASK; // T-3
 
+  // Convert G data from deg/s to rad/s?
+  bool rad_G = imu->settings.rad_G;
+
   // Decode tag
   uint8_t tag = word[FIFO_DATA_OUT_TAG] >> 3;
   switch(tag) {
@@ -413,7 +416,7 @@ DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
                     bytesToInt16(word[FIFO_DATA_OUT_X_H], word[FIFO_DATA_OUT_X_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Y_H], word[FIFO_DATA_OUT_Y_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Z_H], word[FIFO_DATA_OUT_Z_L]),
-                    imu->fullRange_G, true);
+                    imu->fullRange_G, true, rad_G);
       sample_buffer[current].counter = sample_counter;
       break;
     }
@@ -563,7 +566,7 @@ DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
                     bytesToInt16(word[FIFO_DATA_OUT_X_H], word[FIFO_DATA_OUT_X_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Y_H], word[FIFO_DATA_OUT_Y_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Z_H], word[FIFO_DATA_OUT_Z_L]),
-                    imu->fullRange_G, true);
+                    imu->fullRange_G, true, rad_G);
       sample_buffer[current_2].counter = sample_counter-2; // Necessary if XL is not recorded in FIFO
       break;    
     }
@@ -574,7 +577,7 @@ DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
                     bytesToInt16(word[FIFO_DATA_OUT_X_H], word[FIFO_DATA_OUT_X_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Y_H], word[FIFO_DATA_OUT_Y_L]),
                     bytesToInt16(word[FIFO_DATA_OUT_Z_H], word[FIFO_DATA_OUT_Z_L]),
-                    imu->fullRange_G, true);
+                    imu->fullRange_G, true, rad_G);
       sample_buffer[current_1].counter = sample_counter-1; // Necessary if XL is not recorded in FIFO
       break;
     }
@@ -585,14 +588,16 @@ DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
       int16_t G_Y_2 = sample_buffer[current_3].G.rawXYZ[Y_IDX] + signextend<8>(word[FIFO_DATA_OUT_X_H]);
       int16_t G_Z_2 = sample_buffer[current_3].G.rawXYZ[Z_IDX] + signextend<8>(word[FIFO_DATA_OUT_Y_L]);
       // Note that TAGCNT-2 sample's validity depends on the old TAGCNT-3 sample's validity
-      setSampleData(&sample_buffer[current_2].G, G_X_2, G_Y_2, G_Z_2, imu->fullRange_G, sample_buffer[current_3].G.valid);
+      setSampleData(&sample_buffer[current_2].G, G_X_2, G_Y_2, G_Z_2, 
+                    imu->fullRange_G, sample_buffer[current_3].G.valid, rad_G);
       sample_buffer[current_2].counter = sample_counter-2;  // Necessary if XL is not recorded in FIFO
 
       int16_t G_X_1 = G_X_2 + signextend<8>(word[FIFO_DATA_OUT_Y_H]);
       int16_t G_Y_1 = G_Y_2 + signextend<8>(word[FIFO_DATA_OUT_Z_L]);
       int16_t G_Z_1 = G_Z_2 + signextend<8>(word[FIFO_DATA_OUT_Z_H]);
       // Note that TAGCNT-1 sample's validity depends on TAGCNT-2 sample's validity
-      setSampleData(&sample_buffer[current_1].G, G_X_1, G_Y_1, G_Z_1, imu->fullRange_G, sample_buffer[current_2].G.valid);
+      setSampleData(&sample_buffer[current_1].G, G_X_1, G_Y_1, G_Z_1,
+                    imu->fullRange_G, sample_buffer[current_2].G.valid, rad_G);
       sample_buffer[current_1].counter = sample_counter-1;  // Necessary if XL is not recorded in FIFO
       break;
     }
@@ -606,7 +611,7 @@ DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
       int16_t G_Y_2 = sample_buffer[current_3].G.rawXYZ[Y_IDX] + dy;
       int16_t G_Z_2 = sample_buffer[current_3].G.rawXYZ[Z_IDX] + dz;
       // Note that TAGCNT-2 sample's validity depends on the old TAGCNT-3 sample's validity
-      setSampleData(&sample_buffer[current_2].G, G_X_2, G_Y_2, G_Z_2, imu->fullRange_G, sample_buffer[current_3].G.valid);
+      setSampleData(&sample_buffer[current_2].G, G_X_2, G_Y_2, G_Z_2, imu->fullRange_G, sample_buffer[current_3].G.valid, rad_G);
       sample_buffer[current_2].counter = sample_counter-2; // Necessary if XL is not recorded in FIFO
 
       extend5bits(word[FIFO_DATA_OUT_Y_H], word[FIFO_DATA_OUT_Y_L], dx, dy, dz);
@@ -614,7 +619,8 @@ DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
       int16_t G_Y_1 = G_Y_2 + dy;
       int16_t G_Z_1 = G_Z_2 + dz;
       // Note that TAGCNT-1 sample's validity depends on TAGCNT-2 sample's validity
-      setSampleData(&sample_buffer[current_1].G, G_X_1, G_Y_1, G_Z_1, imu->fullRange_G, sample_buffer[current_2].G.valid);
+      setSampleData(&sample_buffer[current_1].G, G_X_1, G_Y_1, G_Z_1, 
+                    imu->fullRange_G, sample_buffer[current_2].G.valid, rad_G);
       sample_buffer[current_1].counter = sample_counter-1;
 
       extend5bits(word[FIFO_DATA_OUT_Z_H], word[FIFO_DATA_OUT_Z_L], dx, dy, dz);
@@ -622,7 +628,8 @@ DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
       int16_t G_Y = G_Y_1 + dy;
       int16_t G_Z = G_Z_1 + dz;
       // Note that TAGCNT sample's validity depends on TAGCNT-1 sample's validity
-      setSampleData(&sample_buffer[current].G, G_X, G_Y, G_Z, imu->fullRange_G, sample_buffer[current_1].G.valid);
+      setSampleData(&sample_buffer[current].G, G_X, G_Y, G_Z,
+                    imu->fullRange_G, sample_buffer[current_1].G.valid, rad_G);
       sample_buffer[current].counter = sample_counter;
       break;
     }
@@ -665,12 +672,58 @@ inline void LSM6DSOXFIFOClass::extend5bits(uint8_t hi, uint8_t lo,
   delta_z = signextend<5>((hi & 0x7C) >> 2);
 }
 
+inline int32_t LSM6DSOXFIFOClass::raw2fixedrad(int16_t raw, uint16_t fullRange)
+{
+  /* This function converts raw, unscaled signed 16-bit deg/s gyroscope
+     data to signed 16.16 fixed point rad/s, by multiplication with
+     fullRange (2000/1000/500/250/125) and with pi/180.
+     It first calculates raw * 2000*pi/180, then uses the lower 4 bits
+     of fullRange to scale the result back in case of smaller fullRange.
+  */
+
+  /* Gyroscope full range to right shift positions.
+     Full range's lower 4 bits determine right shift.
+     All other combinations are invalid and shift all data out. */
+  static const uint8_t shift_lut[16] = {
+     8, // 0b0000 2000 = 7D0
+    32, // 0b0001
+    32, // 0b0010
+    32, // 0b0011
+    10, // 0b0100  500 = 1F4
+    32, // 0b0101
+    32, // 0b0110
+    32, // 0b0111
+     9, // 0b1000 1000 = 3E8
+    32, // 0b1001
+    11, // 0b1010  250 = 0FA
+    32, // 0b1011
+    32, // 0b1100
+    12, // 0b1101  125 = 07D
+    32, // 0b1110
+    32, // 0b1111
+  };
+
+  // The basic concept here is to scale the multiplicand such that it
+  // contains as many significant bits as possible, while preventing
+  // overflow. The resulting signed 16 x unsigned 32 bit multiplication
+  // is split into two signed 16x16->32 bit multiplications, whose
+  // results are added after proper alignment. Then scaling for fullRange
+  // is combined with postprocessing to a signed 16.16 fixed point number.
+  // int(2000*pi/180 * 2^25) = 1171270634 = 17872*65536 + 11242
+  int32_t rad_hi = 17872L * raw;
+  int32_t rad_lo = (11242L * raw) >> 16;
+  int32_t rad = (rad_hi + rad_lo) >> shift_lut[fullRange & 0x000F];
+
+  return rad;
+}
+
 void LSM6DSOXFIFOClass::setSampleData(SampleData *s, 
                                       int16_t X, 
                                       int16_t Y, 
                                       int16_t Z, 
                                       uint16_t fullRange,
-                                      bool valid)
+                                      bool valid,
+                                      bool to_rad)
 {
   s->rawXYZ[X_IDX] = X;
   s->rawXYZ[Y_IDX] = Y;
@@ -679,9 +732,17 @@ void LSM6DSOXFIFOClass::setSampleData(SampleData *s,
 
   s->valid = valid;
   if(valid) {
-    s->XYZ[X_IDX] = (int32_t)X * fullRange;
-    s->XYZ[Y_IDX] = (int32_t)Y * fullRange;
-    s->XYZ[Z_IDX] = (int32_t)Z * fullRange;
+    if(to_rad) {
+      s->XYZ[X_IDX] = raw2fixedrad(X, fullRange);
+      s->XYZ[Y_IDX] = raw2fixedrad(Y, fullRange);
+      s->XYZ[Z_IDX] = raw2fixedrad(Z, fullRange);
+    } else {
+      // Transform into signed 16.16 fixed point numbers
+      int16_t doubleRange = 2*(int16_t)fullRange;
+      s->XYZ[X_IDX] = (int32_t)X * doubleRange;
+      s->XYZ[Y_IDX] = (int32_t)Y * doubleRange;
+      s->XYZ[Z_IDX] = (int32_t)Z * doubleRange;
+    }
   } else {
     // Data is invalid (or undefined)
     s->XYZ[X_IDX] = FIFO_FIXED_POINT_NAN;

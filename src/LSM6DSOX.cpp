@@ -20,8 +20,9 @@
 #include "LSM6DSOX.h"
 #include "LSM6DSOXTables.h"
 
+#define _USE_MATH_DEFINES
 #include <cmath>  // round
-#include <math.h> // NAN
+#include <math.h> // NAN and M_PI
 
 #define LSM6DSOX_ADDRESS            0x6A
 
@@ -124,6 +125,7 @@ LSM6DSOXClass::~LSM6DSOXClass()
 void LSM6DSOXClass::initializeSettings(
       float ODR_XL, float ODR_G, 
       float fullRange_XL, float fullRange_G,
+      bool rad_G,
       float cutoff_LPF2_XL, float cutoff_LPF1_G,
       float cutoff_HPF_G,
       PowerModeXL powerMode_XL,
@@ -136,6 +138,7 @@ void LSM6DSOXClass::initializeSettings(
   settings.ODR_G = ODR_G;
   settings.fullRange_XL = fullRange_XL;
   settings.fullRange_G = fullRange_G;
+  settings.rad_G = rad_G;
   settings.cutoff_LPF2_XL = cutoff_LPF2_XL;
   settings.cutoff_LPF1_G = cutoff_LPF1_G;
   settings.cutoff_HPF_G = cutoff_HPF_G;
@@ -198,14 +201,16 @@ int LSM6DSOXClass::begin()
   if(result >= 0) {
     // 8-bit 2's complement
     int8_t freq_fine = (result & 0x80) ? result - 256 : result;
-    // See AN5272, par 6.4
-    // Note that range divisor = [40000-60*128, 40000+60*127]
-    uint16_t divisor = 40000 + 60*freq_fine;
-    // Fixed point factor. Note that 1000000*2^11 / divisor above will
-    // yield a range of [43007, 63366], fitting a uint16_t.
+    // See AN5272, par 6.4: divisor = 40000 + 60*freq_fine
+    // To find timestamp in microseconds, multiply it by
+    // 1000000 / divisor, or 50000 / (divisor/20).
+    // Note that range divisor/20 = [2000-3*128, 2000+3*127].
+    uint16_t divisor = 2000 + 3*freq_fine;
+    // Fixed point factor. Note that 50000*2^11 / divisor above will
+    // yield a range of [42953, 63366], fitting a uint16_t.
     // Multiply the timestamp (in units of 25us) with this factor and
     // divide it by 2^11, and the corrected timestamp in us is found.
-    internalFrequencyFactor = (1000000UL << INTERNALFREQFACTOR_SHIFT) / divisor;
+    internalFrequencyFactor = (50000UL << INTERNALFREQFACTOR_SHIFT) / divisor;
     result = 1;
   }
 
@@ -470,6 +475,9 @@ int LSM6DSOXClass::readGyroscope(float& x, float& y, float& z)
   }
 
   float range_factor = fullRange_G * (1.0 / 32768);
+  if(settings.rad_G) {
+    range_factor *= M_PI/180.0;
+  }
   x = data[0] * range_factor;
   y = data[1] * range_factor;
   z = data[2] * range_factor;
