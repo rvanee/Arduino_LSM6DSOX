@@ -680,7 +680,7 @@ inline int32_t LSM6DSOXFIFOClass::raw2fixedrad(int16_t raw, uint16_t fullRange)
      It first calculates raw * 2000*pi/180, then uses the lower 4 bits
      of fullRange to scale the result back in case of smaller fullRange.
   */
-
+ 
   /* Gyroscope full range to right shift positions.
      Full range's lower 4 bits determine right shift.
      All other combinations are invalid and shift all data out. */
@@ -712,8 +712,8 @@ inline int32_t LSM6DSOXFIFOClass::raw2fixedrad(int16_t raw, uint16_t fullRange)
   // int(2000*pi/180 * 2^25) = 1171270634 = 17872*65536 + 11242
   int32_t rad_hi = 17872L * raw;
   int32_t rad_lo = (11242L * raw) >> 16;
-  int32_t rad = (rad_hi + rad_lo) >> shift_lut[fullRange & 0x000F];
-
+  int32_t rad = (rad_hi + rad_lo) >> shift_lut[(uint8_t)fullRange & 0x0F];
+ 
   return rad;
 }
 
