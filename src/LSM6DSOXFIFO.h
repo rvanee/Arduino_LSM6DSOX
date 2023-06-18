@@ -164,14 +164,16 @@ class LSM6DSOXFIFOClass {
 
     bool            retrieveSample(Sample& sample);
 
-    // Utility
-    int32_t         raw2fixedrad(int16_t raw, uint16_t fullRange);
-
   private:   
+    inline uint8_t  counterToIdx(uint32_t counter) {
+      return (uint8_t)(counter & SAMPLE_BUFFER_MASK);
+    }
+
     DecodeTagResult decodeWord(uint8_t *word);
-  
     void            extend5bits(uint8_t hi, uint8_t lo, 
                                 int16_t &delta_x, int16_t &delta_y, int16_t &delta_z);
+
+    int32_t         raw2fixedrad(int16_t raw, uint16_t fullRange);
 
     void            setSampleData(SampleData *s, 
                                   int16_t X, int16_t Y, int16_t Z, uint16_t fullRange,
@@ -190,7 +192,7 @@ class LSM6DSOXFIFOClass {
     // Timestamp (reconstruction)
     uint64_t        timestamp64;
     uint64_t        timestamp64_prev;
-    uint32_t        timestamp_counter;
+    uint32_t        timestamp64_counter;
     uint16_t        dt_per_sample;
 
     // MCU timestamp estimation

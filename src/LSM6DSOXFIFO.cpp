@@ -201,7 +201,7 @@ void LSM6DSOXFIFOClass::begin()
   timestamp_reconstruction_enabled = settings.timestamp_decimation > 1;
   timestamp64 = 0;
   timestamp64_prev = 0;
-  timestamp_counter = 0;
+  timestamp64_counter = 0;
   dt_per_sample = FIFO_INT16_NAN;
 
   // If IMU fifo timestamping is disabled, use time stamp estimation
@@ -254,8 +254,8 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
   unsigned long MCU_micros = use_MCU_timestamp ? 
                               micros() :
                               0; // Initialize to prevent warning
-  // Keep current sample counter, to be used for MCU timestamping
-  uint32_t prev_sample_counter = sample_counter;
+  // Keep current sample counter, to be used for timestamping
+  uint32_t current_counter = sample_counter;
 
   // Now process the status data
   if(result != 1) return ReadResult::READ_ERROR;
@@ -294,11 +294,11 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
         // If no compression is enabled, sample data for TAGCNT+0/1 should
         // be invalidated. If compression is enabled, sample data for
         // the previous 2 samples should also be invalidated.
-        invalidateSample(sample_counter & SAMPLE_BUFFER_MASK);
-        invalidateSample((sample_counter+1) & SAMPLE_BUFFER_MASK);
+        invalidateSample(counterToIdx(sample_counter));
+        invalidateSample(counterToIdx(sample_counter+1));
         if(compression_enabled) {
-          invalidateSample((sample_counter-1) & SAMPLE_BUFFER_MASK);
-          invalidateSample((sample_counter-2) & SAMPLE_BUFFER_MASK);
+          invalidateSample(counterToIdx(sample_counter-1));
+          invalidateSample(counterToIdx(sample_counter-2));
         }
         // This word can't be evaluated any further, but we can go on 
         // decoding the next words
@@ -308,41 +308,21 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
       // Update sample counter based on tagcnt
       uint8_t tagcnt = (tag_byte & MASK_FIFO_TAG_CNT) >> 1;
       uint8_t prev_tagcnt = sample_counter & SAMPLE_TAGCNT_MASK;
-      uint32_t release_counter = sample_counter;
-      sample_counter = sample_counter + tagcnt - prev_tagcnt;
-      // TAGCNT rollover?
-      if(tagcnt < prev_tagcnt) sample_counter += 4;
+      int8_t delta_tagcnt = tagcnt - prev_tagcnt;
+      if(delta_tagcnt != 0) {
+        // Add delta tagcnt and rollover (+4) if tagcnt < prev_tagcnt
+        sample_counter += delta_tagcnt + (delta_tagcnt & 0x04);
 
-      // Perform timestamp reconstruction on samples that can be
-      // released, if required
-      if(timestamp_reconstruction_enabled) {
-        // If compression is enabled, there should be a delay of
-        // 2 in releasing samples to account for the compression
-        // algorithm modifying data at T-2 and T-1, rather than 
-        // just at time T.
-        release_counter += compression_enabled << 1;
-        while(release_counter < sample_counter) {
-          release_counter++;
-          Sample *finished_sample = &sample_buffer[(uint8_t)(release_counter & SAMPLE_BUFFER_MASK)];
-
-          // Reconstruction is only necessary if sample's timestamp undefined...
-          if((finished_sample->timestamp != FIFO_ULL_NAN) && 
-            // ... and only possible if delta timestamp per sample is known
-            (dt_per_sample != FIFO_INT16_NAN)) {
-            // Calculate number of samples between newest timestamp and this sample
-            int32_t delta_samples = (finished_sample->counter > timestamp_counter) ?
-              finished_sample->counter - timestamp_counter :
-              -int32_t(timestamp_counter - finished_sample->counter);
-            // Set sample's timestamp relative to latest timestamp and correct it
-            finished_sample->timestamp = 
-              imu->correctTimestamp(timestamp64 + delta_samples*dt_per_sample);
-          }
+        // Test for sample buffer overflow. This will happen when
+        // new sample data would occupy the same position as the
+        // one pointed to by the read counter.
+        if(sample_counter >= (read_counter + SAMPLE_BUFFER_SIZE)) {
+          return ReadResult::QUEUE_FULL;
         }
       }
 
       // Decode word, writes to circular sample buffer
-      DecodeTagResult decodeResult = decodeWord(word);
-      switch(decodeResult) {
+      switch(decodeWord(word)) {
         case DecodeTagResult::OK:
           // All fine
         case DecodeTagResult::TAG_NOT_IMPLEMENTED:
@@ -366,13 +346,57 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
     } // END for(uint8_t *word = &read_buffer; ...
   } while(to_read > 0);
 
-  // If MCU timestamps are to be used, they should be
-  // correlated to the last sample retrieved, since
-  // that will be closest to the MCU micros() found
-  // above. This corresponds to the sample with the
-  // most recent samplecounter.
+  // IMU timestamp reconstruction enabled and possible?
+  // (It won't be possible before at least two timestamp/counter
+  // combinations are available.)
+  if((timestamp_reconstruction_enabled) && 
+     (dt_per_sample != FIFO_INT16_NAN)) {
+    // Find delta samples between the 'current' sample and the sample
+    // with the most recent timestamp64 data. Note that this number
+    // will be in range [-7, 7] or [-31, 31], depending on 
+    // settings.timestamp_decimation.
+    int8_t delta_samples = current_counter - timestamp64_counter;
+    // Linear inter/extrapolation of the current samples timestamp
+    // using the most recent (64 bit) timestamp and its corresponding
+    // sample counter.  
+    unsigned long long t = 
+      timestamp64 + delta_samples*(int32_t)dt_per_sample;
+    // Now calculate timestamps for new samples read and decoded
+    // above, excluding the current sample. That one is not yet
+    // finalized, since it may still receive timing information.
+    for(; current_counter < sample_counter; current_counter++) {
+      // The current sample's timestamp is in timestamp units,
+      // i.e. approximate 25us 'clicks'. It is converted into
+      // microseconds and corrected using a clock multiplier, then
+      // stored in the sample buffer.
+      sample_buffer[counterToIdx(current_counter)].timestamp =
+        imu->correctTimestamp(t);
+      // Advance t one sample, so add dt_per_sample
+      t += dt_per_sample;
+    }
+  }
+
+  // If MCU timestamps are to be used, they should be correlated with
+  // the last sample retrieved, since that will be closest to the MCU
+  // micros() found above. This corresponds to the sample with the
+  // most recent sample counter.
   if(use_MCU_timestamp) {
     MCU_timestamp_estimator.add(sample_counter, MCU_micros);
+
+    // Now estimate timestamps for new samples read and decoded
+    // above, excluding unfinalized samples. When compression
+    // is enabled, this means all samples until sample_counter-2,
+    // if it is disabled, up until sample_counter itself.
+    // This way timestamp estimation takes place using the most
+    // recent data possible.
+    uint32_t unfinalized_counter =
+      sample_counter - (compression_enabled << 1);
+    for(; current_counter < unfinalized_counter; current_counter++) {
+      // Calculate timestamp estimate in microseconds, then store it
+      // in the current sample in the sample buffer
+      sample_buffer[counterToIdx(current_counter)].timestamp =
+        MCU_timestamp_estimator.estimate_micros(current_counter);
+    }
   }
 
   return ReadResult::DATA_READ;
@@ -383,11 +407,21 @@ bool LSM6DSOXFIFOClass::retrieveSample(Sample& sample)
   // If compression is enabled, there should be a delay of 2 in
   // releasing samples to account for the compression algorithm
   // modifying data at T-2 and T-1, rather than just at time T.
-  uint8_t delta_cnt = compression_enabled << 1;
+  uint8_t compression_offset = compression_enabled << 1;
   // Check if a sample is available
-  if((read_counter + delta_cnt) < sample_counter) {
-    sample = sample_buffer[(uint8_t)(read_counter & SAMPLE_BUFFER_MASK)];
+  if((read_counter + compression_offset) < sample_counter) {
+    // Copy sample from the circular sample buffer
+    uint8_t idx = counterToIdx(read_counter);
+    sample = sample_buffer[idx];
     read_counter++;
+    // Set released buffer sample to some 'invalid' values.
+    // This may help debugging problems in decoding logic,
+    // or in MCU<->IMU communication.
+    // NOTE that the raw XL and G values and the 'valid' flag
+    // will not be overwritten if compression is enabled,
+    // since this data may still be needed (in the case of 3xC
+    // decoding below).
+    initializeSample(idx, false);
     return true; // Sample retrieved
   }
   return false; // No sample retrieved (buffer empty)
@@ -399,10 +433,10 @@ DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
   // as well as the sample circular buffer
   
   // Sample counters
-  uint8_t current   = sample_counter     & SAMPLE_BUFFER_MASK; // T
-  uint8_t current_1 = (sample_counter-1) & SAMPLE_BUFFER_MASK; // T-1
-  uint8_t current_2 = (sample_counter-2) & SAMPLE_BUFFER_MASK; // T-2
-  uint8_t current_3 = (sample_counter-3) & SAMPLE_BUFFER_MASK; // T-3
+  uint8_t current   = counterToIdx(sample_counter);   // T
+  uint8_t current_1 = counterToIdx(sample_counter-1); // T-1
+  uint8_t current_2 = counterToIdx(sample_counter-2); // T-2
+  uint8_t current_3 = counterToIdx(sample_counter-3); // T-3
 
   // Convert G data from deg/s to rad/s?
   bool rad_G = imu->settings.rad_G;
@@ -444,7 +478,7 @@ DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
       uint32_t timestamp = 
         (((uint32_t)word[FIFO_DATA_OUT_Y_H]) << 24) | 
         (((uint32_t)word[FIFO_DATA_OUT_Y_L]) << 16) |
-        (((uint32_t)word[FIFO_DATA_OUT_X_H]) <<  8) |
+        (((uint16_t)word[FIFO_DATA_OUT_X_H]) <<  8) |
          (          word[FIFO_DATA_OUT_X_L]);
       
       // For timestamp reconstruction:
@@ -460,16 +494,19 @@ DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
       timestamp64 = (timestamp64 & 0xFFFFFFFF00000000) | timestamp;
 
       // Store (corrected) timestamp in current sample
-      sample_buffer[current].timestamp = timestamp64 * imu->internalFrequencyFactor;
+      sample_buffer[current].timestamp = imu->correctTimestamp(timestamp64);
 
-      // Calculate delta timestamp per sample (used for timestamp reconstruction)
-      dt_per_sample = (timestamp_counter == sample_counter) ?
+      // Calculate delta timestamp per sample (used for timestamp reconstruction).
+      // Note that this should always be an integer value, because the IMU
+      // uses a base clock of ~25us and all ODR time intervals are integer
+      // multiples of this.
+      uint8_t delta_counter = sample_counter - timestamp64_counter;
+      dt_per_sample = (delta_counter == 0) ?
                       FIFO_INT16_NAN :
-                      uint16_t(timestamp64   - timestamp64_prev) /
-                      uint8_t(sample_counter - timestamp_counter);
+                      uint16_t(timestamp64 - timestamp64_prev) / delta_counter;
 
       // store current sample counter as last timestamp counter
-      timestamp_counter = sample_counter;
+      timestamp64_counter = sample_counter;
       break;
     }
 
@@ -733,12 +770,18 @@ void LSM6DSOXFIFOClass::setSampleData(SampleData *s,
   s->valid = valid;
   if(valid) {
     if(to_rad) {
+      // Convert from 16 bit signed deg/s to signed 16.16
+      // bit fixed point numbers in rad/s, by multiplication
+      // with 2 * fullRange * pi/180
+      // (raw data is in range [-32768, 32767]).
       s->XYZ[X_IDX] = raw2fixedrad(X, fullRange);
       s->XYZ[Y_IDX] = raw2fixedrad(Y, fullRange);
       s->XYZ[Z_IDX] = raw2fixedrad(Z, fullRange);
     } else {
-      // Transform into signed 16.16 fixed point numbers
-      int16_t doubleRange = 2*(int16_t)fullRange;
+      // Transform into signed 16.16 fixed point numbers,
+      // by multiplication with 2*fullRange
+      // (raw data is in range [-32768, 32767]).
+      int16_t doubleRange = (int16_t)fullRange << 1;
       s->XYZ[X_IDX] = (int32_t)X * doubleRange;
       s->XYZ[Y_IDX] = (int32_t)Y * doubleRange;
       s->XYZ[Z_IDX] = (int32_t)Z * doubleRange;
@@ -764,21 +807,28 @@ void LSM6DSOXFIFOClass::initializeSample(uint8_t idx, bool setStatusInvalid)
   // set to remarkable values in order to signal errors.
   // If compression is used, older raw values may be
   // used as reference for increments.
+  SampleData *XL = &sample_buffer[idx].XL;
+  SampleData *G  = &sample_buffer[idx].G;
   if(!compression_enabled) {
-    SampleData *XL = &sample_buffer[idx].XL;
     bool valid_XL = XL->valid & !setStatusInvalid;
-    setSampleData(XL, FIFO_INT16_NAN, FIFO_INT16_NAN, FIFO_INT16_NAN, 0, valid_XL);
-    XL->XYZ[X_IDX] = FIFO_FIXED_POINT_NAN;
-    XL->XYZ[Y_IDX] = FIFO_FIXED_POINT_NAN;
-    XL->XYZ[Z_IDX] = FIFO_FIXED_POINT_NAN;
+    setSampleData(XL,
+                  FIFO_INT16_NAN, FIFO_INT16_NAN, FIFO_INT16_NAN,
+                  0, valid_XL);
 
-    SampleData *G = &sample_buffer[idx].G;
     bool valid_G = G->valid & !setStatusInvalid;
-    setSampleData(G, FIFO_INT16_NAN, FIFO_INT16_NAN, FIFO_INT16_NAN, 0, valid_G);
-    G->XYZ[X_IDX] = FIFO_FIXED_POINT_NAN;
-    G->XYZ[Y_IDX] = FIFO_FIXED_POINT_NAN;
-    G->XYZ[Z_IDX] = FIFO_FIXED_POINT_NAN;
+    setSampleData(G, 
+                  FIFO_INT16_NAN, FIFO_INT16_NAN, FIFO_INT16_NAN,
+                  0, valid_G);
   }
+
+  // XL and G 16.16 bit fixed point values may be set to Not A Number
+  XL->XYZ[X_IDX] = FIFO_FIXED_POINT_NAN;
+  XL->XYZ[Y_IDX] = FIFO_FIXED_POINT_NAN;
+  XL->XYZ[Z_IDX] = FIFO_FIXED_POINT_NAN;
+
+  G->XYZ[X_IDX] = FIFO_FIXED_POINT_NAN;
+  G->XYZ[Y_IDX] = FIFO_FIXED_POINT_NAN;
+  G->XYZ[Z_IDX] = FIFO_FIXED_POINT_NAN;
 }
 
 void LSM6DSOXFIFOClass::invalidateSample(uint8_t idx)
