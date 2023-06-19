@@ -198,7 +198,7 @@ void LSM6DSOXFIFOClass::begin()
   compression_enabled = settings.compression;
     // Timestamp reconstruction is only possible and relevant if
     // timestamp decimation is > 0 and > 1, respectively
-  timestamp_reconstruction_enabled = settings.timestamp_decimation > 1;
+  timestamp_reconstruction_enabled = (settings.timestamp_decimation > 1);
   timestamp64 = 0;
   timestamp64_prev = 0;
   timestamp64_counter = 0;
@@ -206,7 +206,7 @@ void LSM6DSOXFIFOClass::begin()
 
   // If IMU fifo timestamping is disabled, use time stamp estimation
   // using the MCU's micros() clock
-  use_MCU_timestamp = settings.timestamp_decimation == 0;
+  use_MCU_timestamp = (settings.timestamp_decimation == 0);
   if(use_MCU_timestamp) {
     // Initialize MCU timestamp estimator using the current clock value
     MCU_timestamp_estimator.reset(micros());
@@ -389,8 +389,10 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
     // if it is disabled, up until sample_counter itself.
     // This way timestamp estimation takes place using the most
     // recent data possible.
-    uint32_t unfinalized_counter =
-      sample_counter - (compression_enabled << 1);
+    uint8_t delta_compression = (compression_enabled << 1);
+    uint32_t unfinalized_counter = (sample_counter > delta_compression) ?
+      sample_counter - delta_compression :
+      0;
     for(; current_counter < unfinalized_counter; current_counter++) {
       // Calculate timestamp estimate in microseconds, then store it
       // in the current sample in the sample buffer
