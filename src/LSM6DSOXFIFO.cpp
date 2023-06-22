@@ -208,8 +208,8 @@ void LSM6DSOXFIFOClass::begin()
   // using the MCU's micros() clock
   use_MCU_timestamp = (settings.timestamp_decimation == 0);
   if(use_MCU_timestamp) {
-    // Initialize MCU timestamp estimator using the current clock value
-    MCU_timestamp_estimator.reset(micros());
+    // Initialize MCU timestamp estimator
+    MCU_timestamp_estimator.reset();
   }
 }
 
@@ -359,12 +359,12 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
     // Linear inter/extrapolation of the current samples timestamp
     // using the most recent (64 bit) timestamp and its corresponding
     // sample counter.  
-    unsigned long long t = 
-      timestamp64 + delta_samples*(int32_t)dt_per_sample;
-    // Now calculate timestamps for new samples read and decoded
-    // above, excluding the current sample. That one is not yet
-    // finalized, since it may still receive timing information.
-    for(; current_counter < sample_counter; current_counter++) {
+    uint64_t t = timestamp64 + delta_samples*(int32_t)dt_per_sample;
+    // Now calculate timestamps for all new samples read and decoded
+    // above, including the current sample. That one may still receive
+    // timing information later, but in that case the timestamp will
+    // simply be overwritten; otherwise it may never be written.
+    for(; current_counter <= sample_counter; current_counter++) {
       // The current sample's timestamp is in timestamp units,
       // i.e. approximate 25us 'clicks'. It is converted into
       // microseconds and corrected using a clock multiplier, then
@@ -383,17 +383,12 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
   if(use_MCU_timestamp) {
     MCU_timestamp_estimator.add(sample_counter, MCU_micros);
 
-    // Now estimate timestamps for new samples read and decoded
-    // above, excluding unfinalized samples. When compression
-    // is enabled, this means all samples until sample_counter-2,
-    // if it is disabled, up until sample_counter itself.
-    // This way timestamp estimation takes place using the most
-    // recent data possible.
-    uint8_t delta_compression = (compression_enabled << 1);
-    uint32_t unfinalized_counter = (sample_counter > delta_compression) ?
-      sample_counter - delta_compression :
-      0;
-    for(; current_counter < unfinalized_counter; current_counter++) {
+    // Now calculate timestamps for all new samples read and decoded
+    // above, including the current sample. That one may be revisited
+    // later, but in that case the timestamp will simply be overwritten
+    // with more recent timing information; otherwise it may never be
+    // written.
+    for(; current_counter <= sample_counter; current_counter++) {
       // Calculate timestamp estimate in microseconds, then store it
       // in the current sample in the sample buffer
       sample_buffer[counterToIdx(current_counter)].timestamp =

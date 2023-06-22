@@ -189,18 +189,18 @@ class LSM6DSOXFIFOClass {
     uint32_t        sample_counter; // Actual sample number. Lowest 2 bits resemble TAGCNT
     uint32_t        read_counter;   // First finished sample number that is not yet read
 
-    // Timestamp (reconstruction)
+    // IMU timestamp reconstruction
     uint64_t        timestamp64;
     uint64_t        timestamp64_prev;
     uint32_t        timestamp64_counter;
     uint16_t        dt_per_sample;
+    bool            timestamp_reconstruction_enabled;
 
     // MCU timestamp estimation
     TimestampEstimator MCU_timestamp_estimator;
     bool            use_MCU_timestamp;
 
     bool            compression_enabled;
-    bool            timestamp_reconstruction_enabled;
 };
 
 #endif // LSM6DSOXFIFO_H
