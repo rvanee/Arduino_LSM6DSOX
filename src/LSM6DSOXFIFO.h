@@ -197,6 +197,7 @@ class LSM6DSOXFIFOClass {
     bool            timestamp_reconstruction_enabled;
 
     // MCU timestamp estimation
+public: // TODO remove
     TimestampEstimator MCU_timestamp_estimator;
     bool            use_MCU_timestamp;
 

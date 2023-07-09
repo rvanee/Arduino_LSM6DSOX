@@ -334,7 +334,7 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
           // communication error. Or it may indicate using
           // this code on a later version of the IMU, that
           // may or may not be backwards compatible.
-          // Mitigation is in decodeWord(), where sample 
+          // Mitigation is in decodeWord(), where sample
           // data is invalidated for both XL and G data.
           break;
         default:
@@ -381,18 +381,19 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
   // micros() found above. This corresponds to the sample with the
   // most recent sample counter.
   if(use_MCU_timestamp) {
-    MCU_timestamp_estimator.add(sample_counter, MCU_micros);
+    sample_buffer[counterToIdx(current_counter)].timestamp =
+      MCU_timestamp_estimator.add(sample_counter, MCU_micros);
 
     // Now calculate timestamps for all new samples read and decoded
     // above, including the current sample. That one may be revisited
     // later, but in that case the timestamp will simply be overwritten
     // with more recent timing information; otherwise it may never be
     // written.
-    for(; current_counter <= sample_counter; current_counter++) {
+    for(current_counter++; current_counter <= sample_counter; current_counter++) {
       // Calculate timestamp estimate in microseconds, then store it
       // in the current sample in the sample buffer
       sample_buffer[counterToIdx(current_counter)].timestamp =
-        MCU_timestamp_estimator.estimate_micros(current_counter);
+        MCU_timestamp_estimator.next();
     }
   }
 

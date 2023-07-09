@@ -23,10 +23,15 @@
 #include <Arduino.h>
 
 
+// Stage 1 collects data for ~0.25s, in which the sample interval
+// is considered stable (it is mainly affected by temperature, which
+// will not change significantly in that short period of time).
+#define TIMESTAMP_STAGE1_DURATION 250000
+
 // Number of value pairs in buffer. This should be a (small)
 // power of 2, <8. Buffer size should be inversely proportional to 
 // the correlation between IMU sample counter and MCU microseconds.
-#define TIMESTAMP_BUFFER_POWER2   6
+#define TIMESTAMP_BUFFER_POWER2   8
 #define TIMESTAMP_BUFFER_SIZE     (1 << TIMESTAMP_BUFFER_POWER2)
 #define TIMESTAMP_BUFFER_MASK     (TIMESTAMP_BUFFER_SIZE-1)
 
@@ -38,19 +43,65 @@
 // 64 bit integer. A reasonable value seems to be the number of bits
 // in the buffer size plus two, requiring decoding such that at most
 // 4 samples are read from the fifo on average for each decoder loop.
-#define TIMESTAMP_BSCALE_POWER2   (2)
+#define TIMESTAMP_BSCALE_POWER2   (32)
+#define TIMESTAMP_BSCALE          (1ULL << TIMESTAMP_BSCALE_POWER2)
 
-class SimpleUInt128 {
-    uint64_t            hi64;
-    uint64_t            lo64;
+class TEFirstStage {
+  public:
+    TEFirstStage(uint32_t duration = TIMESTAMP_STAGE1_DURATION);
+    ~TEFirstStage();
 
-    //void                add(uint32_t x32);
-    //void                add(uint64_t x64);
-    //void                sub(uint32_t x32);
-    //void                sub(uint64_t x64);
-    //void                mul(uint64_t x32);
-    //void                mul(uint64_t x64);
+    void                reset();
+    void                initialize(uint32_t IMU_counter, uint64_t MCU_micros_64);
+    uint64_t            add(uint32_t IMU_counter, uint64_t MCU_micros_64);
 
+  private:
+    bool                initialized;
+
+    uint32_t            duration;
+    uint16_t            N;
+
+    uint32_t            IMU_prev;
+    uint32_t            IMU_ref;
+    uint32_t            IMU_sum;
+    uint64_t            IMU_sum_sq;
+
+    uint64_t            MCU_ref;
+    uint64_t            MCU_sum;
+    uint64_t            MCU_sum_IMU;
+};
+
+class TESecondStage {
+  public:
+    TESecondStage();
+    ~TESecondStage();
+
+    void                reset();
+    void                initialize(uint32_t IMU_counter, uint64_t MCU_micros_64);
+    uint64_t            add(uint32_t IMU_counter, uint64_t MCU_micros_64);
+    uint64_t            estimate_next();
+
+  private:
+    uint16_t            N;
+    uint16_t            buf_idx;
+
+    uint32_t            IMU_prev;
+    uint32_t            IMU_ref;
+    uint32_t            IMU_sum;
+    uint64_t            IMU_sum_sq;
+    uint16_t            IMU_delta_counter[TIMESTAMP_BUFFER_SIZE];
+
+    uint64_t            MCU_prev;
+    uint64_t            MCU_ref;
+    uint64_t            MCU_sum;
+    uint64_t            MCU_sum_IMU;
+    uint32_t            MCU_delta_timestamp[TIMESTAMP_BUFFER_SIZE];
+
+    uint64_t            a;
+    uint64_t            b_denominator;
+    lldiv_t             b;
+    uint64_t            estimate;
+    uint64_t            estimate_fraction;
 };
 
 class TimestampEstimator {
@@ -60,32 +111,15 @@ class TimestampEstimator {
 
     void                reset();
 
-    void                add(uint32_t IMU_counter, uint32_t MCU_micros);
-    inline uint64_t     estimate_micros(uint32_t IMU_counter)
-    {
-      return MCU_ref + ((b_scaled * (IMU_counter - IMU_ref)) >> TIMESTAMP_BSCALE_POWER2);
-    }
-    uint32_t            IMU_sum_sq_max;
-    uint64_t            MCU_sum_IMU_max;
+    uint64_t            add(uint32_t IMU_counter, uint32_t MCU_micros);
+    uint64_t            next();
 
   private:
-    uint8_t             N;
-    uint8_t             buf_idx;
+    uint64_t            MCU_current;
 
-    uint8_t             IMU_delta_counter[TIMESTAMP_BUFFER_SIZE];
-    uint32_t            IMU_sum;
-    uint64_t            IMU_sum_sq;
-    uint32_t            IMU_ref;
-    uint32_t            IMU_prev;
-
-    uint32_t            MCU_delta_timestamp[TIMESTAMP_BUFFER_SIZE];
-    uint64_t            MCU_sum;
-    uint64_t            MCU_sum_IMU;
-    uint64_t            MCU_ref;
-    uint64_t            MCU_prev;
-
-    // b is a fixed point number scaled by 2**TIMESTAMP_BSCALE_POWER2
-    uint64_t            b_scaled;
+    // Stages
+    TEFirstStage        firstStage;
+    TESecondStage       secondStage;
 };
 
 #endif // TIMESTAMPESTIMATOR_H
