@@ -23,33 +23,27 @@
 #include <Arduino.h>
 
 
-// Stage 1 collects data for ~0.25s, in which the sample interval
-// is considered stable (it is mainly affected by temperature, which
-// will not change significantly in that short period of time).
+// Stage 1 is a downsampling stage that takes care of the
+// wide range of sample frequencies that the IMU offers.
+// It collects MCU timestamps in microseconds related to
+// the IMU sample counter, for a short interval (~0.25s).
+// Setting this interval too large will cause overflow
+// errors in the filter when using high sample rates.
 #define TIMESTAMP_STAGE1_DURATION 250000
 
-// Number of value pairs in buffer. This should be a (small)
-// power of 2, <8. Buffer size should be inversely proportional to 
-// the correlation between IMU sample counter and MCU microseconds.
-#define TIMESTAMP_BUFFER_POWER2   8
-#define TIMESTAMP_BUFFER_SIZE     (1 << TIMESTAMP_BUFFER_POWER2)
-#define TIMESTAMP_BUFFER_MASK     (TIMESTAMP_BUFFER_SIZE-1)
+// Stage 2 is the main stage. It contains a deque of stage 1
+// output timestamp/counter pairs, implemented as a circular
+// buffer with a power-of-2 size for performance reasons.
+// This size should be reasonably small (~2**8) to limit
+// memory use and prevent overflow.
+#define TIMESTAMP_STAGE2_POWER2   4
+#define TIMESTAMP_STAGE2_SIZE     (1 << TIMESTAMP_STAGE2_POWER2)
+#define TIMESTAMP_STAGE2_MASK     (TIMESTAMP_STAGE2_SIZE-1)
 
-// The b factor is a fixed point (rational) number relating an
-// increase in sample counts to an increase in microseconds. It 
-// should be scaled up ideally to the first power of 2 larger than
-// the largest value of (MCU_micros - IMU_ref). It should also be
-// small enough to have b * (MCU_micros - IMU_ref) fit in a 
-// 64 bit integer. A reasonable value seems to be the number of bits
-// in the buffer size plus two, requiring decoding such that at most
-// 4 samples are read from the fifo on average for each decoder loop.
-#define TIMESTAMP_BSCALE_POWER2   (32)
-#define TIMESTAMP_BSCALE          (1ULL << TIMESTAMP_BSCALE_POWER2)
 
 class TEFirstStage {
   public:
     TEFirstStage(uint32_t duration = TIMESTAMP_STAGE1_DURATION);
-    ~TEFirstStage();
 
     void                reset();
     void                initialize(uint32_t IMU_counter, uint64_t MCU_micros_64);
@@ -74,11 +68,11 @@ class TEFirstStage {
 class TESecondStage {
   public:
     TESecondStage();
-    ~TESecondStage();
-
+  
     void                reset();
     void                initialize(uint32_t IMU_counter, uint64_t MCU_micros_64);
-    uint64_t            add(uint32_t IMU_counter, uint64_t MCU_micros_64);
+    void                add(uint32_t IMU_counter, uint64_t MCU_micros_64);
+    uint64_t            estimate_first(uint32_t IMU_counter);
     uint64_t            estimate_next();
 
   private:
@@ -89,13 +83,13 @@ class TESecondStage {
     uint32_t            IMU_ref;
     uint32_t            IMU_sum;
     uint64_t            IMU_sum_sq;
-    uint16_t            IMU_delta_counter[TIMESTAMP_BUFFER_SIZE];
+    uint16_t            IMU_delta_counter[TIMESTAMP_STAGE2_SIZE];
 
     uint64_t            MCU_prev;
     uint64_t            MCU_ref;
     uint64_t            MCU_sum;
     uint64_t            MCU_sum_IMU;
-    uint32_t            MCU_delta_timestamp[TIMESTAMP_BUFFER_SIZE];
+    uint32_t            MCU_delta_timestamp[TIMESTAMP_STAGE2_SIZE];
 
     uint64_t            a;
     uint64_t            b_denominator;
@@ -107,12 +101,12 @@ class TESecondStage {
 class TimestampEstimator {
   public:
     TimestampEstimator();
-    ~TimestampEstimator();
-
+  
     void                reset();
 
-    uint64_t            add(uint32_t IMU_counter, uint32_t MCU_micros);
-    uint64_t            next();
+    void                add(uint32_t IMU_counter, uint32_t MCU_micros);
+    uint64_t            estimate_first(uint32_t IMU_counter);
+    uint64_t            estimate_next();
 
   private:
     uint64_t            MCU_current;

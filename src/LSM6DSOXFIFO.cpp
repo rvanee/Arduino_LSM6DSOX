@@ -355,11 +355,17 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
     // with the most recent timestamp64 data. Note that this number
     // will be in range [-7, 7] or [-31, 31], depending on 
     // settings.timestamp_decimation.
-    int8_t delta_samples = current_counter - timestamp64_counter;
-    // Linear inter/extrapolation of the current samples timestamp
-    // using the most recent (64 bit) timestamp and its corresponding
-    // sample counter.  
-    uint64_t t = timestamp64 + delta_samples*(int32_t)dt_per_sample;
+    // Then use linear inter/extrapolation of the current samples
+    // timestamp using the most recent (64 bit) timestamp and its
+    // corresponding sample counter.  
+    uint64_t t = timestamp64;
+    if(current_counter > timestamp64_counter) {
+      uint8_t delta_samples = current_counter - timestamp64_counter;
+      t += delta_samples*(uint32_t)dt_per_sample;
+    } else {
+      uint8_t delta_samples = timestamp64_counter - current_counter;
+      t -= delta_samples*(uint32_t)dt_per_sample;
+    }
     // Now calculate timestamps for all new samples read and decoded
     // above, including the current sample. That one may still receive
     // timing information later, but in that case the timestamp will
@@ -381,19 +387,20 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
   // micros() found above. This corresponds to the sample with the
   // most recent sample counter.
   if(use_MCU_timestamp) {
-    sample_buffer[counterToIdx(current_counter)].timestamp =
-      MCU_timestamp_estimator.add(sample_counter, MCU_micros);
+    MCU_timestamp_estimator.add(sample_counter, MCU_micros);
 
     // Now calculate timestamps for all new samples read and decoded
     // above, including the current sample. That one may be revisited
     // later, but in that case the timestamp will simply be overwritten
     // with more recent timing information; otherwise it may never be
     // written.
+    sample_buffer[counterToIdx(current_counter)].timestamp =
+      MCU_timestamp_estimator.estimate_first(current_counter);
     for(current_counter++; current_counter <= sample_counter; current_counter++) {
       // Calculate timestamp estimate in microseconds, then store it
       // in the current sample in the sample buffer
       sample_buffer[counterToIdx(current_counter)].timestamp =
-        MCU_timestamp_estimator.next();
+        MCU_timestamp_estimator.estimate_next();
     }
   }
 
