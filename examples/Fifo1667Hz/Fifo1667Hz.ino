@@ -14,12 +14,10 @@
 */
 
 #include <Arduino_LSM6DSOX.h>
-#include <limits>
-#include <math.h> // isnan
 
 
-#define REPORT_INTERVAL       10000
-#define ODR_ALL               833
+#define REPORT_INTERVAL       60000
+#define ODR_ALL               1667
 
 
 class SimpleStats {
@@ -62,9 +60,12 @@ SimpleStats execution_time = SimpleStats("execution_time");
 SimpleStats temperature = SimpleStats("temperature");
 SimpleStats XL[3] = {SimpleStats("XL_X"), SimpleStats("XL_Y"), SimpleStats("XL_Z")};
 SimpleStats G[3] = {SimpleStats("G_X"), SimpleStats("G_Y"), SimpleStats("G_Z")};
+SimpleStats sample_interval = SimpleStats("sample_interval");
+SimpleStats a = SimpleStats("a");
 
 int lasttime;
 uint32_t prev_counter;
+uint64_t prev_micros;
 
 unsigned long XL_invalid;
 unsigned long G_invalid;
@@ -75,7 +76,11 @@ void setup() {
   while (!Serial);
   Serial.println("Starting device...");
 
-  IMU.settings.i2c_frequency = 400000;
+  // The LSM6DSOX supports I2c fast mode (400kb/s).
+  // You may also try fast mode plus (1000kb/s); 
+  // this worked on my 2023 Arduino Nano RP2040. 
+  IMU.settings.i2c_frequency = 400000; // or 1000000 (fast mode plus)
+  IMU.settings.rad_G = true; // Gyro output in rad/s rather than deg/s
   IMU.settings.powerMode_XL = XL_POWER_MODE_HP;
   IMU.settings.ODR_XL = ODR_ALL;
   //IMU.settings.cutoff_LPF2_XL = 400;
@@ -86,7 +91,6 @@ void setup() {
   IMU.settings.fullRange_G = 125;
   if (!IMU.begin()) {
     Serial.println("Failed to initialize IMU!");
-
     while (1);
   }
 
@@ -98,7 +102,7 @@ void setup() {
   IMU.fifo.settings.compression = true;
   IMU.fifo.settings.BDR_XL = ODR_ALL;
   IMU.fifo.settings.BDR_G = ODR_ALL;
-  IMU.fifo.settings.timestamp_decimation = 8;
+  IMU.fifo.settings.timestamp_decimation = 0;
   IMU.fifo.settings.BDR_temperature = 52;
   IMU.fifo.begin();
   
@@ -109,6 +113,8 @@ void setup() {
   num_errors = 0;
 
   lasttime = millis();
+
+  prev_micros = micros();
 }
 
 void loop() {
@@ -182,6 +188,13 @@ void loop() {
         G[ig].add((1.0/65536)*sample.G.XYZ[ig]);
       }
     }
+
+    // Update sample interval statistics
+    // Exclude first 10% of samples to have the filters settle down
+    if(sample.counter > ((REPORT_INTERVAL*ODR_ALL)/10000)) {
+      sample_interval.add(sample.timestamp - prev_micros);
+    }
+    prev_micros = sample.timestamp;
   } // END while(retrieveSample(sample))
 
   // Reporting
@@ -225,15 +238,28 @@ void loop() {
 
     // Display G stddev information + bookkeeping
     for(int ig=0; ig < 3; ig++) {
-      double G_std_mdegs = 1000*G[ig].std();
-      Serial.println(G[ig].name+" std = "+String(G_std_mdegs)+" mdeg/s");
+      double G_std_munits = 1000*G[ig].std();
+      Serial.print(G[ig].name+" std = "+String(G_std_munits));
+      if(IMU.settings.rad_G) {
+        Serial.println(" mrad/s");
+      } else {
+        Serial.println(" mdeg/s");
+      }
       G[ig].reset();
     }
+
+    // Display sample interval information
+    Serial.println("sample interval = "+String(sample_interval.mean())+" (std="+
+      String(sample_interval.std())+") us ("+String(sample_interval.N)+" samples)");
+    Serial.println("  min = "+String(sample_interval.min)+", max = "+
+      String(sample_interval.max));
+    sample_interval.reset();
 
     Serial.println("---");
 
     // Restart FIFO
     IMU.fifo.begin();
     prev_counter = 0;
+    prev_micros = micros();
   } // END if(deltat > REPORT_INTERVAL)
 } // END void loop()

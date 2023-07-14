@@ -394,13 +394,11 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
     // later, but in that case the timestamp will simply be overwritten
     // with more recent timing information; otherwise it may never be
     // written.
-    sample_buffer[counterToIdx(current_counter)].timestamp =
-      MCU_timestamp_estimator.estimate_first(current_counter);
-    for(current_counter++; current_counter <= sample_counter; current_counter++) {
+    for(; current_counter <= sample_counter; current_counter++) {
       // Calculate timestamp estimate in microseconds, then store it
       // in the current sample in the sample buffer
       sample_buffer[counterToIdx(current_counter)].timestamp =
-        MCU_timestamp_estimator.estimate_next();
+        MCU_timestamp_estimator.estimate(current_counter);
     }
   }
 
@@ -801,8 +799,8 @@ void LSM6DSOXFIFOClass::setSampleData(SampleData *s,
 
 void LSM6DSOXFIFOClass::initializeSample(uint8_t idx, bool setStatusInvalid)
 {
-  // timestamp and temperature are not always sent
-  sample_buffer[idx].timestamp = FIFO_ULL_NAN;
+  // timestamp and temperature are not always se(n)t
+  sample_buffer[idx].timestamp = 0;
   sample_buffer[idx].temperature = NAN;
 
   // Set counter to 'impossible' value to help identify errors

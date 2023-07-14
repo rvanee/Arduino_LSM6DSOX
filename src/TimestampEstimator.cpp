@@ -49,23 +49,15 @@ void TimestampEstimator::add(uint32_t IMU_counter, uint32_t MCU_micros)
   }
 }
 
-uint64_t TimestampEstimator::estimate_first(uint32_t IMU_counter)
+uint64_t TimestampEstimator::estimate(uint32_t IMU_counter)
 {
-  return secondStage.estimate_first(IMU_counter);
-}
-
-uint64_t TimestampEstimator::estimate_next()
-{
-  return secondStage.estimate_next();
+  return secondStage.estimate(IMU_counter);
 }
 
 TEFirstStage::TEFirstStage(uint32_t duration) {
   this->duration = duration;
   reset();
 }
-
-//TEFirstStage::~TEFirstStage() {
-//}
 
 void TEFirstStage::reset()
 {
@@ -141,9 +133,6 @@ TESecondStage::TESecondStage() {
   reset();
 }
 
-//TESecondStage::~TESecondStage() {
-//}
-
 void TESecondStage::reset()
 {
   N = 0;
@@ -159,8 +148,10 @@ void TESecondStage::reset()
   a = 0;
   b_denominator = 0;
   b = {0, 0};
-  estimate = 0;
+
+  estimate_micros = 0;
   estimate_fraction = 0;
+  estimate_IMU = 0;
 }
 
 void TESecondStage::initialize(uint32_t IMU_counter, uint64_t MCU_micros_64)
@@ -248,6 +239,12 @@ void TESecondStage::add(uint32_t IMU_counter, uint64_t MCU_micros_64)
           MCU_ref - ((b_IMU_sum - MCU_sum) >> TIMESTAMP_STAGE2_POWER2);
   }
 
+  // Reset estimate (fraction)
+  estimate_micros = 0;
+  estimate_fraction = 0;
+  estimate_IMU = 0;
+
+/*
   Serial.print("N="+String(N));
   Serial.print(", IMU_counter=");
   Serial.print(IMU_counter);
@@ -263,48 +260,61 @@ void TESecondStage::add(uint32_t IMU_counter, uint64_t MCU_micros_64)
   Serial.print(b.rem);
   Serial.print(", a=");
   Serial.println(a);
+  */
 }
 
 // Linear extrapolation based on linear regression above
-uint64_t TESecondStage::estimate_first(uint32_t IMU_counter)
+uint64_t TESecondStage::estimate(uint32_t IMU_counter)
 {
-  uint16_t ref_delta_IMU = IMU_counter - IMU_ref;
- 
-  // MCU estimate = a + b*delta_IMU
-  // Note that b consists of an integer part (b.quot) and a fractional
-  // part. The fractional part represents a rational number: 
-  // b.rem / b_denominator.
-  lldiv_t remainder_product = 
-    div(static_cast<long long>(b.rem)*ref_delta_IMU,
-        static_cast<long long>(b_denominator));
-  estimate = a +
-             static_cast<uint64_t>(b.quot)*ref_delta_IMU +
-             static_cast<uint64_t>(remainder_product.quot);
+  if(N >= 2) { // 2 or more samples necessary for valid estimate
+    if(estimate_micros == 0) {
+      uint16_t ref_delta_IMU = IMU_counter - IMU_ref;
+    
+      // MCU estimate = a + b*delta_IMU
+      // Note that b consists of an integer part (b.quot) and a fractional
+      // part. The fractional part represents a rational number: 
+      // b.rem / b_denominator.
+      lldiv_t remainder_product = 
+        div(static_cast<long long>(b.rem)*ref_delta_IMU,
+            static_cast<long long>(b_denominator));
+      estimate_micros = a +
+                static_cast<uint64_t>(b.quot)*ref_delta_IMU +
+                static_cast<uint64_t>(remainder_product.quot);
 
-  // Keep a running account of the fraction for use in estimate_next()
-  estimate_fraction = static_cast<uint64_t>(remainder_product.rem);
+      // Keep a running account of the fraction for use in estimate_next()
+      estimate_fraction = static_cast<uint64_t>(remainder_product.rem);
 
-  //Serial.print(", estimate=");
-  //Serial.print(estimate);
-  //Serial.print(", estimate_fraction=");
-  //Serial.println(estimate_fraction);
+      // Store IMU counter associated with this estimate
+      estimate_IMU = IMU_counter;
 
-  return estimate;
-}
+/*
+      Serial.print("estimate_micros=");
+      Serial.print(estimate_micros);
+      Serial.print(", estimate_fraction=");
+      Serial.print(estimate_fraction);
+      Serial.print(", estimate_IMU=");
+      Serial.println(estimate_IMU);
+      */
+    } else { // so estimate_micros != 0
+      while(IMU_counter > estimate_IMU) {
+        // Add b to current estimate:
+        // + integer part
+        estimate_micros += static_cast<uint64_t>(b.quot);
 
-// Linear extrapolation
-uint64_t TESecondStage::estimate_next()
-{
-  // Add b to current estimate:
-  // + integer part
-  estimate += static_cast<uint64_t>(b.quot);
+        // + fractional/rational part (= b_remainder / b_denominator)
+        estimate_fraction += static_cast<uint64_t>(b.rem);
+        if(estimate_fraction >= b_denominator) {
+          estimate_fraction -= b_denominator;
+          estimate_micros++;
+        }
 
-  // + fractional/rational part (= b_remainder / b_denominator)
-  estimate_fraction += static_cast<uint64_t>(b.rem);
-  if(estimate_fraction >= b_denominator) {
-    estimate++;
-    estimate_fraction -= b_denominator;
+        // Advance IMU counter corresponding to the new estimate
+        estimate_IMU++;
+      }
+    }
+  } else { // N < 2
+    estimate_micros = 0;
   }
-  
-  return estimate;
+
+  return estimate_micros;
 }

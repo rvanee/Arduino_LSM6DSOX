@@ -46,7 +46,6 @@
 
 #define FIFO_INT16_NAN        0xFFFF
 #define FIFO_FIXED_POINT_NAN  0xFFFFFFFF
-#define FIFO_ULL_NAN          0xFFFFFFFFFFFFFFFF
 
 enum class ReadResult {
   NO_DATA_AVAILABLE,
@@ -107,7 +106,7 @@ struct SampleData {
 struct Sample {
   SampleData G;
   SampleData XL;
-  unsigned long long timestamp; // Timestamp in microseconds. May be FIFO_ULL_NAN
+  unsigned long long timestamp; // Timestamp in microseconds. May be 0 (= undefined)
   float temperature;            // May be NaN
   uint32_t counter;             // Lowest 2 bits provided by tag byte (TAG_CNT)
 };
