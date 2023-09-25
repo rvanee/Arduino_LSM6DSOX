@@ -26,15 +26,19 @@
 // Stage 1 is a downsampling stage that takes care of the
 // wide range of sample frequencies that the IMU offers.
 // It collects MCU timestamps in microseconds related to
-// the IMU sample counter, for a short interval (~0.16s).
+// the IMU sample counter, for a short interval (0.25s,
+// ~3*sample interval @ 12.5Hz).
 // Setting this interval too large will cause overflow
-// errors in the filter when using high sample rates.
-#define TIMESTAMP_STAGE1_DURATION 160000
+// errors in the filter when using high sample rates;
+// setting it too low will increase variability in 
+// sample interval estimation, especially for lower
+// sample frequencies.
+#define TIMESTAMP_STAGE1_DURATION 250000
 
 // Stage 2 is the main stage. It contains a deque of stage 1
 // output timestamp/counter pairs, implemented as a circular
 // buffer with a power-of-2 size for performance reasons.
-// This size should be reasonably small (~2**8) to limit
+// This size should be reasonably small (<~2**8) to limit
 // memory use and prevent overflow.
 #define TIMESTAMP_STAGE2_POWER2   6
 #define TIMESTAMP_STAGE2_SIZE     (1 << TIMESTAMP_STAGE2_POWER2)

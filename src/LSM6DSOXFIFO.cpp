@@ -99,6 +99,12 @@ void LSM6DSOXFIFOClass::initializeSettings(
   bool      compression,              // true = enable compression
   uint8_t   uncompressed_decimation,  // Uncompressed data every 0/8/16/32 batch data
 
+  // Autorange
+  bool      autorange,                // Enables XL and G autorange feature
+  uint8_t   autorange_alpha,          // Used for extrapolation
+  uint16_t  autorange_threshold_up,   // Threshold going up
+  uint16_t  autorange_threshold_down, // Threshold going down
+
   // Watermarks
   uint16_t  watermark_level,          // 9 bits (0-511)
   uint16_t  counter_threshold,        // 11 bits (0-2047)
@@ -118,7 +124,13 @@ void LSM6DSOXFIFOClass::initializeSettings(
   // Compression
   settings.compression = compression;
   settings.uncompressed_decimation = uncompressed_decimation;
-    
+
+  // Autorange
+  settings.autorange = autorange;     // Enables XL and G autorange feature
+  settings.autorange_alpha = autorange_alpha; // Used for extrapolation
+  settings.autorange_threshold_up = autorange_threshold_up;     // Threshold going up
+  settings.autorange_threshold_down = autorange_threshold_down; // Threshold going down
+   
   // Watermarks
   settings.watermark_level = watermark_level;
   settings.counter_threshold = counter_threshold;
@@ -211,6 +223,9 @@ void LSM6DSOXFIFOClass::begin()
     // Initialize MCU timestamp estimator
     MCU_timestamp_estimator.reset();
   }
+
+  // Initialize AutoRanger
+  autoRanger.reset(settings.autorange_alpha);
 }
 
 void LSM6DSOXFIFOClass::end()
@@ -308,7 +323,7 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
       // Update sample counter based on tagcnt
       uint8_t tagcnt = (tag_byte & MASK_FIFO_TAG_CNT) >> 1;
       uint8_t prev_tagcnt = sample_counter & SAMPLE_TAGCNT_MASK;
-      int8_t delta_tagcnt = tagcnt - prev_tagcnt;
+      int8_t delta_tagcnt = static_cast<int8_t>(tagcnt) - static_cast<int8_t>(prev_tagcnt);
       if(delta_tagcnt != 0) {
         // Add delta tagcnt and rollover (+4) if tagcnt < prev_tagcnt
         sample_counter += delta_tagcnt + (delta_tagcnt & 0x04);
@@ -345,6 +360,47 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
       }
     } // END for(uint8_t *word = &read_buffer; ...
   } while(to_read > 0);
+
+  if(settings.autorange) {
+    // If compression is enabled, there should be a delay of 2 in
+    // releasing samples to account for the compression algorithm
+    // modifying data at T-2 and T-1, rather than just at time T.
+    uint8_t compression_offset = compression_enabled << 1;
+    // Find the most recent sample that is guaranteed to be 
+    // completely finished, and the sample before that
+    uint32_t finished_sample = sample_counter - compression_offset - 1;
+    Sample *prev_sample = &sample_buffer[counterToIdx(finished_sample-1)];
+    Sample *curr_sample = &sample_buffer[counterToIdx(finished_sample)];
+
+    int8_t delta_range = autoRanger.predict_range(prev_sample, curr_sample);
+    
+  uint32_t orred_abs_prediction = static_cast<uint32_t>((x >= 0) ? x : -x);
+  orred_values |= static_cast<uint32_t>((y >= 0) ? y : -y);
+  orred_values |= static_cast<uint32_t>((z >= 0) ? z : -z);
+
+  // Extract the 'high nibble': the lowest nibble of the high 16-bit word
+  // Note that value should always be < 0x000FFFF0
+  uint8_t highNibble = static_cast<uint8_t>(orred_values >> 16);
+
+    for(i=0; i < 3; i++) {
+      //Absolute worst case: 65536*3+32767
+      int32_t current_value = static_cast<int32_t>(curr_sample->XL.rawXYZ[i]);
+      int32_t delta = current_value - static_cast<int32_t>(prev_sample->XL.rawXYZ[i]);
+      int32_t prediction = current_value + settings.autorange_alpha * delta;
+      uint32_t abs_prediction = (prediction >= 0) ?
+        static_cast<uint32_t>(prediction) :
+        static_cast<uint32_t>(-prediction);
+
+    uint8_t bits = abs_prediction
+    }
+
+/*
+  settings.autorange = autorange;     // Enables XL and G autorange feature
+  settings.autorange_alpha = autorange_alpha; // Used for extrapolation
+  settings.autorange_threshold_up = autorange_threshold_up;     // Threshold going up
+  settings.autorange_threshold_down = autorange_threshold_down; // Threshold going down
+*/
+  }
 
   // IMU timestamp reconstruction enabled and possible?
   // (It won't be possible before at least two timestamp/counter
@@ -490,7 +546,7 @@ DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
 
       // Test for timestamp overrun, i.e. from large 32-bit value in previous step
       // to value close to 0
-      if((timestamp64 & 0xFFFFFFFF) > timestamp) {
+      if(static_cast<uint32_t>(timestamp64) > timestamp) {
         timestamp64 += (1ULL << 32); // Add one to highest 32 bits
       }
       // Now replace lower 32 bits of timestamp64 with new 32-bit timestamp value

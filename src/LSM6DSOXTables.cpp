@@ -45,6 +45,12 @@ const vectorOfFloatsAndBits LSM6DSOXTables::FR_XL_bits = { // FS1_XL FS0_XL (CTR
   {  8, 0b11 }, 
   { 16, 0b01 }
 };
+const vectorOfIntsAndDownUpBits LSM6DSOXTables::FR_XL_bits_down_and_up = {
+  {  2, {0b00, 0b00, 0b00, 0b00, 0b00, 0b10, 0b11, 0b01, 0b01 } },
+  {  4, {0b00, 0b00, 0b00, 0b00, 0b10, 0b11, 0b01, 0b01, 0b01 } },
+  {  8, {0b00, 0b00, 0b00, 0b10, 0b11, 0b01, 0b01, 0b01, 0b01 } },
+  { 16, {0b00, 0b00, 0b10, 0b11, 0b01, 0b01, 0b01, 0b01, 0b01 } }
+};
 
 // G Full Range configuration bits
 const vectorOfFloatsAndBits LSM6DSOXTables::FR_G_bits = { // FS1_G FS0_G FS_125 (CTRL2_G)
@@ -53,6 +59,13 @@ const vectorOfFloatsAndBits LSM6DSOXTables::FR_G_bits = { // FS1_G FS0_G FS_125 
   {  500, 0b010 }, 
   { 1000, 0b100 }, 
   { 2000, 0b110 }
+};
+const vectorOfIntsAndDownUpBits LSM6DSOXTables::FR_G_bits_down_and_up = { // FS1_G FS0_G FS_125 (CTRL2_G)
+  {  125, { 0b001, 0b001, 0b001, 0b001, 0b001, 0b000, 0b010, 0b100, 0b110 } }, 
+  {  250, { 0b001, 0b001, 0b001, 0b001, 0b000, 0b010, 0b100, 0b110, 0b110 } }, 
+  {  500, { 0b001, 0b001, 0b001, 0b000, 0b010, 0b100, 0b110, 0b110, 0b110 } }, 
+  { 1000, { 0b001, 0b001, 0b000, 0b010, 0b100, 0b110, 0b110, 0b110, 0b110 } }, 
+  { 2000, { 0b001, 0b000, 0b010, 0b100, 0b110, 0b110, 0b110, 0b110, 0b110 } }
 };
 
 // XL LPF2 ODR divisor configuration bits

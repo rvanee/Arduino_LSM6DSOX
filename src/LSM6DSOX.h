@@ -130,6 +130,8 @@ class LSM6DSOXClass {
     uint16_t fullRange_G;
 
   private:
+    int setFullRange_XL_bits(uint8_t fr_bits);
+    int setFullRange_G_bits(uint8_t fr_bits);
     int readRegister(uint8_t address);
     int readRegisters(uint8_t address, uint8_t* data, size_t length);
     int writeRegister(uint8_t address, uint8_t value);

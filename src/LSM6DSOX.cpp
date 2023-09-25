@@ -336,6 +336,30 @@ int LSM6DSOXClass::setFullRange_XL(float range)
   // so expected values will always fit. Then select corresponding configuration
   // bits.
   uint8_t fr_bits = LSM6DSOXTables::largerOrEqualFloatToBits(range, LSM6DSOXTables::FR_XL_bits);
+  return setFullRange_XL_bits(fr_bits);
+}
+
+int LSM6DSOXClass::setRelativeFullRange_XL(uint16_t range, int8_t delta_range) 
+{
+  if((delta_range >= -4) && (delta_range <= 4)) {
+    for(auto &range_to_bits: LSM6DSOXTables::FR_XL_bits_down_and_up) 
+    {
+      if(range == range_to_bits.first) {
+        // range_to_bits contains 9 entries for each range:
+        // -4/-3/-2/-1, current range (0), +1/+2/+3/+4
+        uint8_t fr_bits = range_to_bits.second[delta_range + 4];
+        // Only set new scale if the bit pattern differs from the current one
+        if(fr_bits != range_to_bits.second[4]) {
+          return setFullRange_XL_bits(fr_bits);
+        }
+      }
+    }
+  }
+  return -1; // Wrong parameter (range or delta_range)
+}
+
+int LSM6DSOXClass::setFullRange_XL_bits(uint8_t fr_bits) 
+{
   int result = readModifyWriteRegister(LSM6DSOX_CTRL1_XL, fr_bits << 2, MASK_FR_XL);
   if(result > 0) {
     // Store selected full range
@@ -350,6 +374,30 @@ int LSM6DSOXClass::setFullRange_G(float range)
   // so expected values will always fit. Then select corresponding configuration
   // bits.
   uint8_t fr_bits = LSM6DSOXTables::largerOrEqualFloatToBits(range, LSM6DSOXTables::FR_G_bits);
+  return setFullRange_G_bits(fr_bits);
+}
+
+int LSM6DSOXClass::setRelativeFullRange_G(uint16_t range, int8_t delta_range) 
+{
+  if((delta_range >= -4) && (delta_range <= 4)) {
+    for(auto &range_to_bits: LSM6DSOXTables::FR_G_bits_down_and_up) 
+    {
+      if(range == range_to_bits.first) {
+        // range_to_bits contains 9 entries for each range:
+        // -4/-3/-2/-1, current range (0), +1/+2/+3/+4
+        uint8_t fr_bits = range_to_bits.second[delta_range + 4];
+        // Only set new scale if the bit pattern differs from the current one
+        if(fr_bits != range_to_bits.second[4]) {
+          return setFullRange_G_bits(fr_bits);
+        }
+      }
+    }
+  }
+  return -1; // Wrong parameter (range or delta_range)
+}
+
+int LSM6DSOXClass::setFullRange_G_bits(uint8_t fr_bits) 
+{
   int result = readModifyWriteRegister(LSM6DSOX_CTRL2_G, fr_bits << 1, MASK_FR_G);
   if(result > 0) {
     // Store selected full range

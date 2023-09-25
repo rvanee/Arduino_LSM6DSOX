@@ -23,6 +23,7 @@
 #include <Arduino.h>
 #include <limits>
 #include "TimestampEstimator.h"
+#include "AutoRanger.h"
 
 
 // I2C buffer size is limited to 32 bytes, see link below.
@@ -46,6 +47,10 @@
 
 #define FIFO_INT16_NAN        0xFFFF
 #define FIFO_FIXED_POINT_NAN  0xFFFFFFFF
+
+#define FIFO_AUTORANGE_ALPHA    3       // Trial and error
+#define FIFO_AUTORANGE_THR_UP   0x7FF0  // Trial and error, should be < 32767
+#define FIFO_AUTORANGE_THR_DOWN 0x7F00  // Trial and error, should be < THR_UP
 
 enum class ReadResult {
   NO_DATA_AVAILABLE,
@@ -73,6 +78,12 @@ public:
   // Compression
   bool      compression;              // true = enable compression
   uint8_t   uncompressed_decimation;  // Uncompressed data every 0/8/16/32 batch data
+
+  // Autorange
+  bool      autorange;                // Enables XL and G autorange feature
+  uint8_t   autorange_alpha;          // Used for extrapolation
+  uint16_t  autorange_threshold_up;   // Threshold going up
+  uint16_t  autorange_threshold_down; // Threshold going down
 
   // Watermarks
   uint16_t  watermark_level;          // 9 bits (0-511)
@@ -122,7 +133,7 @@ inline int16_t signextend(const uint8_t x)
 // Utility: convert 2 bytes to (signed) int16
 inline int16_t bytesToInt16(uint8_t hi, uint8_t lo)
 { 
-  return ((int16_t)hi << 8) + lo;
+  return (static_cast<int16_t>(hi) << 8) + lo;
 }
 
 class LSM6DSOXClass;
@@ -145,6 +156,12 @@ class LSM6DSOXFIFOClass {
       bool      compression = true,       // true = enable compression
       uint8_t   uncompressed_decimation = 32,// Uncompressed data every 0/8/16/32 batch data
 
+      // Autorange
+      bool      autorange = false,        // Enables XL and G autorange feature
+      uint8_t   autorange_alpha = FIFO_AUTORANGE_ALPHA,             // Used for extrapolation
+      uint16_t  autorange_threshold_up = FIFO_AUTORANGE_THR_UP,     // Threshold going up
+      uint16_t  autorange_threshold_down = FIFO_AUTORANGE_THR_DOWN, // Threshold going down
+
       // Watermarks
       uint16_t  watermark_level = 0,      // 9 bits (0-511)
       uint16_t  counter_threshold = 9,    // 11 bits (0-2047)
@@ -165,7 +182,7 @@ class LSM6DSOXFIFOClass {
 
   private:   
     inline uint8_t  counterToIdx(uint32_t counter) {
-      return (uint8_t)(counter & SAMPLE_BUFFER_MASK);
+      return static_cast<uint8_t>(counter) & SAMPLE_BUFFER_MASK;
     }
 
     DecodeTagResult decodeWord(uint8_t *word);
@@ -196,11 +213,13 @@ class LSM6DSOXFIFOClass {
     bool            timestamp_reconstruction_enabled;
 
     // MCU timestamp estimation
-public: // TODO remove
     TimestampEstimator MCU_timestamp_estimator;
     bool            use_MCU_timestamp;
 
     bool            compression_enabled;
+
+    // AutoRanger
+    AutoRanger      autoRanger;
 };
 
 #endif // LSM6DSOXFIFO_H

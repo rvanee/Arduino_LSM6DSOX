@@ -22,6 +22,7 @@
 #include <map>
 
 typedef std::vector<std::pair<float, uint8_t>> vectorOfFloatsAndBits;
+typedef std::vector<std::pair<uint16_t, std::vector<uint8_t>>> vectorOfIntsAndDownUpBits;
 
 class LSM6DSOXTables {
   public:
@@ -30,9 +31,11 @@ class LSM6DSOXTables {
 
     // XL Full Range configuration bits
     static const vectorOfFloatsAndBits FR_XL_bits;
+    static const vectorOfIntsAndDownUpBits FR_XL_bits_down_and_up;
 
     // G Full Range configuration bits
     static const vectorOfFloatsAndBits FR_G_bits;
+    static const vectorOfIntsAndDownUpBits FR_G_bits_down_and_up;
 
     // XL LPF2 ODR divisor configuration bits
     static const vectorOfFloatsAndBits LPF2_XL_bits;
