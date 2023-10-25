@@ -22,8 +22,8 @@
 #include "LSM6DSOXFIFO.h"
 #include "LSM6DSOXTables.h"
 
-#include <bitset>
-#include <algorithm>
+//#include <bitset>
+//#include <algorithm>
 
 
 LSM6DSOXAutoRanger::LSM6DSOXAutoRanger(const vectorOfFloatsAndBits& v) {
@@ -39,15 +39,21 @@ LSM6DSOXAutoRanger::LSM6DSOXAutoRanger(const vectorOfFloatsAndBits& v) {
 
 void LSM6DSOXAutoRanger::reset(uint16_t threshold_up, uint16_t threshold_down)
 {
+  // Configuration
   this->threshold_up = threshold_up;
   this->threshold_down = threshold_down;
 
+  // Short history of samples
+  samples_deque.clear();
+
+  // Last reported full range
   current_full_range = 0;
 
+  // Pending full range change
   new_full_range_pending = false;
   new_full_range = 0;
   counter_at_change = 0;
-  delta_counter = LSM6DSOXAutoRanger_INITIAL_DELAY;
+  delay_to_change = LSM6DSOXAUTORANGER_INITIAL_DELAY;
 }
 
 void LSM6DSOXAutoRanger::notify_set_full_range(uint32_t current_counter, uint16_t new_full_range)
@@ -70,7 +76,7 @@ void LSM6DSOXAutoRanger::notify_new_full_range(uint32_t current_counter, uint16_
   if(new_full_range_pending && (this->new_full_range == new_full_range)) {
     // This is our best estimate of the delay in sample numbers between
     // initiating a change in full range and noticing the effect of it.
-    delta_counter = current_counter - counter_at_change;
+    delay_to_change = current_counter - counter_at_change;
     new_full_range_pending = false;
   }
 }
@@ -137,13 +143,54 @@ uint16_t LSM6DSOXAutoRanger::add_and_check_sample(uint32_t counter, LSM6DSOXSamp
   // when the optimal full range found above is larger than the
   // currently set full range (emergency gear up to prevent overflow).
   if(full_range > current_full_range) {
-    return full_range;
+    // Now check if a full range change is already pending. If so, 
+    // only override that if the new optimal full range is larger 
+    // than the one being set right now.
+    if(!new_full_range_pending || (full_range > new_full_range)) {
+      notify_set_full_range(counter, full_range);
+      return full_range;
+    }
   }
 
   // No emergency change necessary
   return 0;
 }
 
+uint16_t LSM6DSOXAutoRanger::check_underflow()
+{
+  uint16_t full_range = 0;
+
+  // Of course, no full range change should be pending.
+  // The deque should contain more samples than are being
+  // produced during full range change set to effect.
+  if(!new_full_range_pending &&
+     (samples_deque.size() > delay_to_change)) {
+    // Find largest optimal full range in deque
+    uint16_t fr = 0;
+    for(auto s: samples_deque) {
+      if(fr < s.optimal_full_range) fr = s.optimal_full_range;
+    }
+    if(fr < current_full_range) {
+      // It is safe to decrease the full range to fr
+      full_range = fr;
+      notify_set_full_range(samples_deque.back().counter, full_range);
+    }
+  }
+
+  // Reduce deque size to no more than delay_to_change+1
+  for(int n_remove = samples_deque.size() - delay_to_change - 1; 
+      n_remove >= 0;
+      n_remove--) {
+    // Remove samples from the front of the queue
+    samples_deque.pop_front();
+  }
+
+  // Signal full scale range change (if )
+  return full_range;
+}
+
+
+/*
 uint16_t LSM6DSOXAutoRanger::predict_range(LSM6DSOXSampleData *prev_sample, LSM6DSOXSampleData *curr_sample)
 {
   // Predict absolute values for X, Y and Z, and find max.
@@ -166,7 +213,7 @@ uint16_t LSM6DSOXAutoRanger::predict_range(LSM6DSOXSampleData *prev_sample, LSM6
     threshold <<= 1;
   }
   if(scale_up_down == 0) { 
-    /* TODO
+    // TODO
     // Scaling down involves finding the max value of a number of consecutive
     // samples, then scale that into the desired range [threshold_down, threshold_up].
     // Restart history after scale change.
@@ -174,11 +221,11 @@ uint16_t LSM6DSOXAutoRanger::predict_range(LSM6DSOXSampleData *prev_sample, LSM6
     for(; (scale_up_down >= -4) && (max_abs_prediction <= threshold); scale_up_down--) {
       threshold >>= 1;
     } 
-    */  
+    
   }
   return scale_up_down;
 
-  /*        Serial.print("LSM6DSOXAutoRanger::predict_range pred=");
+          Serial.print("LSM6DSOXAutoRanger::predict_range pred=");
           Serial.print(orred_abs_predictions);
           Serial.print(" curr=");
           Serial.print(orred_abs_current);
@@ -186,8 +233,8 @@ uint16_t LSM6DSOXAutoRanger::predict_range(LSM6DSOXSampleData *prev_sample, LSM6
           Serial.print(combined_bits, HEX);
           Serial.print(" leading_one=");
           Serial.print(leading_one);
-*/
 }
+*/
 
 inline uint32_t LSM6DSOXAutoRanger::max_abs_value(LSM6DSOXSampleData &sample)
 {
@@ -198,6 +245,7 @@ inline uint32_t LSM6DSOXAutoRanger::max_abs_value(LSM6DSOXSampleData &sample)
   return max(max_abs,    abs(static_cast<int32_t>(sample.rawXYZ[2])));
 }
 
+/*
 inline uint32_t LSM6DSOXAutoRanger::abs_prediction(int16_t prev_value, int16_t curr_value)
 {
   int32_t curr_value_32 = static_cast<int32_t>(curr_value);
@@ -206,7 +254,9 @@ inline uint32_t LSM6DSOXAutoRanger::abs_prediction(int16_t prev_value, int16_t c
 
   return static_cast<uint32_t>(abs(prediction));
 }
+*/
 
+/*
 uint16_t LSM6DSOXAutoRanger::adjusted_full_range(uint16_t full_range, int8_t range_factor)
 {
   int s = v_ranges.size();
@@ -223,3 +273,4 @@ uint16_t LSM6DSOXAutoRanger::adjusted_full_range(uint16_t full_range, int8_t ran
   }
   return 0; // full_range not found in v_ranges (this should not happen!)
 }
+*/

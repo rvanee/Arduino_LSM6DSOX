@@ -208,8 +208,8 @@ class LSM6DSOXFIFOClass {
     bool            compression_enabled;
 
     // LSM6DSOXAutoRangers
-    LSM6DSOXAutoRanger      LSM6DSOXAutoRanger_XL;
-    LSM6DSOXAutoRanger      LSM6DSOXAutoRanger_G;
+    LSM6DSOXAutoRanger      AutoRanger_XL;
+    LSM6DSOXAutoRanger      AutoRanger_G;
 };
 
 #endif // LSM6DSOXFIFO_H

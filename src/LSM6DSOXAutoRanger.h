@@ -17,8 +17,8 @@
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-#ifndef LSM6DSOXAutoRanger_H
-#define LSM6DSOXAutoRanger_H
+#ifndef LSM6DSOXAUTORANGER_H
+#define LSM6DSOXAUTORANGER_H
 
 #include <vector>
 #include <deque>
@@ -43,14 +43,14 @@ using namespace std;
    threshold up, to allow for some hysteresis to prevent oscillation.
  */
 // 
-#define LSM6DSOXAutoRanger_INITIAL_DELAY  5
-#define LSM6DSOXAutoRanger_THRESHOLD_UP   32000
-#define LSM6DSOXAutoRanger_THRESHOLD_DOWN 15000
+#define LSM6DSOXAUTORANGER_INITIAL_DELAY  5
+#define LSM6DSOXAUTORANGER_THRESHOLD_UP   32000
+#define LSM6DSOXAUTORANGER_THRESHOLD_DOWN 15000
 
 // Forward declarations to break dependency cycle
-class LSM6DSOXSampleData;
+struct LSM6DSOXSampleData;
 
-class LSM6DSOXAutoRangerSample {
+struct LSM6DSOXAutoRangerSample {
     LSM6DSOXSampleData  sample;
     uint32_t            counter;
     uint16_t            optimal_full_range;
@@ -61,33 +61,38 @@ class LSM6DSOXAutoRanger {
     LSM6DSOXAutoRanger(const vectorOfFloatsAndBits& v);
 
     void reset(
-      uint16_t threshold_up = LSM6DSOXAutoRanger_THRESHOLD_UP,
-      uint16_t threshold_down = LSM6DSOXAutoRanger_THRESHOLD_DOWN
+      uint16_t threshold_up = LSM6DSOXAUTORANGER_THRESHOLD_UP,
+      uint16_t threshold_down = LSM6DSOXAUTORANGER_THRESHOLD_DOWN
     );
 
     void notify_set_full_range(uint32_t current_counter, uint16_t new_full_range);
     void notify_new_full_range(uint32_t current_counter, uint16_t new_full_range);
 
     uint16_t add_and_check_sample(uint32_t counter, LSM6DSOXSampleData &sample);
-    uint16_t predict_range(LSM6DSOXSampleData *prev_sample, LSM6DSOXSampleData *curr_sample);
+    uint16_t check_underflow();
+    //uint16_t predict_range(LSM6DSOXSampleData *prev_sample, LSM6DSOXSampleData *curr_sample);
 
   private:
     uint32_t max_abs_value(LSM6DSOXSampleData &sample);
-    uint32_t abs_prediction(int16_t prev_value, int16_t curr_value);
-    uint16_t adjusted_full_range(uint16_t full_range, int8_t range_factor);
+    //uint32_t abs_prediction(int16_t prev_value, int16_t curr_value);
+    //uint16_t adjusted_full_range(uint16_t full_range, int8_t range_factor);
 
   private:
-    int16_t threshold_up;
-    int16_t threshold_down;
+    // Configuration
+    uint16_t  threshold_up;
+    uint16_t  threshold_down;
 
+    // Short history of samples
     deque<LSM6DSOXAutoRangerSample> samples_deque;
 
+    // Last reported full range
     uint16_t  current_full_range;
 
+    // Pending full range change
     bool      new_full_range_pending;
     uint16_t  new_full_range;
     uint32_t  counter_at_change;
-    uint16_t  delta_counter;
+    uint16_t  delay_to_change;
 };
 
-#endif // LSM6DSOXAutoRanger_H
+#endif // LSM6DSOXAUTORANGER_H

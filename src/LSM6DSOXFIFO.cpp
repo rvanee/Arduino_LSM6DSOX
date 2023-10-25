@@ -222,8 +222,9 @@ void LSM6DSOXFIFOClass::begin()
     MCU_timestamp_estimator.reset();
   }
 
-  // Initialize LSM6DSOXAutoRanger
-  LSM6DSOXAutoRanger.reset(settings.threshold_up, settings.threshold_down);
+  // Initialize AutoRangers
+  AutoRanger_XL.reset(settings.threshold_up, settings.threshold_down);
+  AutoRanger_G.reset(settings.threshold_up, settings.threshold_down);
 }
 
 void LSM6DSOXFIFOClass::end()
@@ -269,6 +270,8 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
                               0; // Initialize to prevent warning
   // Keep current sample counter, to be used for timestamping
   uint32_t current_counter = sample_counter;
+  // ... and for autoranging
+  uint32_t autorange_counter = sample_counter;
 
   // Now process the status data
   if(result != 1) return ReadResult::READ_ERROR;
@@ -364,42 +367,58 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
       }
 
       if(settings.autorange) {
-        // Find the most recent sample that is guaranteed to be 
-        // completely finished, and the sample before that
-        uint32_t finished_sample = sample_counter - compression_offset - 1;
-        Sample &prev_sample = sample_buffer[counterToIdx(finished_sample-1)];
-        Sample &curr_sample = sample_buffer[counterToIdx(finished_sample)];
+        uint32_t finished_sample_counter = sample_counter - compression_offset - 1;
+        for(; autorange_counter <= finished_sample_counter; autorange_counter++) {
+          Sample &sample = sample_buffer[counterToIdx(autorange_counter)];
 
-        // Only adapt range if a previous change has been processed (so the
-        // current sample's range matches the IMU's), and previous and
-        // current sample's ranges are identical.
-        if((imu->fullRange_XL == curr_sample.XL.fullRange) &&
-          (prev_sample.XL.fullRange == curr_sample.XL.fullRange)) {
-          int8_t delta_range_XL = LSM6DSOXAutoRanger_XL.predict_range(&prev_sample.XL, &curr_sample.XL);
-          if(delta_range_XL) { // Change range if delta range != 0
-            if(setRelativeFullRange_XL(curr_sample.XL.fullRange, delta_range_XL) > 0) {
-              LSM6DSOXAutoRanger_XL.notify_set_full_range(curr_sample.counter, )
-            }
-            
+          // Check for need of emergency full range increase: overflow would lead 
+          // to loss of most significant bit(s)
+          uint16_t new_full_range_XL =
+            AutoRanger_XL.add_and_check_sample(autorange_counter, sample.XL);
+          if(new_full_range_XL > 0) {
+Serial.print("XL ");
+Serial.print(imu->fullRange_XL);
+Serial.print(" -> ");
+Serial.println(new_full_range_XL);
+            imu->setFullRange_XL(new_full_range_XL);
+          }
+
+          uint16_t new_full_range_G =
+            AutoRanger_G.add_and_check_sample(autorange_counter, sample.G);
+          if(new_full_range_G > 0) {
+Serial.print("G ");
+Serial.print(imu->fullRange_G);
+Serial.print(" -> ");
+Serial.println(new_full_range_G);
+            imu->setFullRange_G(new_full_range_G);
           }
         }
-
-        // Only adapt range if a previous change has been processed (so the
-        // current sample's range matches the IMU's), and previous and
-        // current sample's ranges are identical.
-        if((imu->fullRange_G == curr_sample.G.fullRange) &&
-          (prev_sample.G.fullRange == curr_sample.G.fullRange)) {
-          int8_t delta_range_G = LSM6DSOXAutoRanger_G.predict_range(&prev_sample.G, &curr_sample.G);
-          if(delta_range_G) { // Change range if delta range != 0
-
-            imu->setRelativeFullRange_G(curr_sample.G.fullRange, delta_range_G);
-          }
-        }
-      }
-
+      } // END if(settings.autorange)
     } // END for(uint8_t *word = &read_buffer; ...
   } while(to_read > 0);
 
+  if(settings.autorange) {
+    // Now check if the XL and G full ranges may be scaled
+    // down, in order to gain accuracy in the least significant
+    // bits of the XL/G raw X/Y/Z values
+    uint16_t new_full_range_XL = AutoRanger_XL.check_underflow();
+    if(new_full_range_XL > 0) {
+Serial.print("XL ");
+Serial.print(imu->fullRange_XL);
+Serial.print(" -> ");
+Serial.println(new_full_range_XL);
+      imu->setFullRange_XL(new_full_range_XL);
+    }
+
+    uint16_t new_full_range_XL = AutoRanger_G.check_underflow();
+    if(new_full_range_G > 0) {
+Serial.print("G ");
+Serial.print(imu->fullRange_G);
+Serial.print(" -> ");
+Serial.println(new_full_range_G);
+      imu->setFullRange_XL(new_full_range_G);
+    }
+  }
 
   // IMU timestamp reconstruction enabled and possible?
   // (It won't be possible before at least two timestamp/counter
@@ -575,7 +594,7 @@ DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
       uint16_t fr_G = LSM6DSOXTables::getFloatFromBits(fs_g, LSM6DSOXTables::FR_G_bits);
       sample_buffer[current].G.fullRange = fr_G;
       if(settings.autorange && (imu->fullRange_G != fr_G)) {
-        LSM6DSOXAutoRanger_G.notify_new_full_range(fr_G);
+        AutoRanger_G.notify_new_full_range(fr_G);
       }
       imu->fullRange_G = fr_G;
 
@@ -584,7 +603,7 @@ DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
       uint16_t fr_XL = LSM6DSOXTables::getFloatFromBits(fs_xl, LSM6DSOXTables::FR_XL_bits);
       sample_buffer[current].XL.fullRange = fr_XL;
       if(settings.autorange && (imu->fullRange_XL != fr_XL)) {
-        LSM6DSOXAutoRanger_XL.notify_new_full_range(fr_XL);
+        AutoRanger_XL.notify_new_full_range(fr_XL);
       }
       imu->fullRange_XL = fr_XL;
 

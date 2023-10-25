@@ -91,7 +91,9 @@ class LSM6DSOXClass {
     int setODR_G(float odr);
 
     int setFullRange_XL(float range);
+    int setFullRange_XL(uint16_t range);
     int setFullRange_G(float range);
+    int setFullRange_G(uint16_t range);
 
     int setLPF2_XL(float cutoff, float odr);
     int setLPF1_G(float cutoff, float odr);
@@ -130,9 +132,7 @@ class LSM6DSOXClass {
     uint16_t fullRange_G;
 
   private:
-    int setRelativeFullRange_XL(uint16_t range, int8_t delta_range);
     int setFullRange_XL_bits(uint8_t fr_bits);
-    int setRelativeFullRange_G(uint16_t range, int8_t delta_range);
     int setFullRange_G_bits(uint8_t fr_bits);
     int readRegister(uint8_t address);
     int readRegisters(uint8_t address, uint8_t* data, size_t length);
