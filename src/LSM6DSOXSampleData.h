@@ -17,27 +17,16 @@
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-#ifndef AUTORANGER_H
-#define AUTORANGER_H
+#ifndef LSM6DSOXSampleData_H
+#define LSM6DSOXSampleData_H
 
 #include <Arduino.h>
 
-
-#define AUTORANGE_ALPHA_DEFAULT   3
-
-class AutoRanger {
-  public:
-    AutoRanger();
-
-    int8_t predict_range(SampleData *prev_sample, SampleData *curr_sample);
-
-  private:
-    void reset(uint8_t alpha = AUTORANGE_ALPHA_DEFAULT);
-
-    uint32_t abs_prediction(int16_t prev_value, int16_t curr_value);
-
-  private:
-    uint8_t alpha;
+struct LSM6DSOXSampleData {
+  int32_t XYZ[3];       // Fixed point data: decimal point between bits 15 and 16
+  int16_t rawXYZ[3];
+  uint16_t fullRange;
+  bool valid;
 };
 
-#endif // AUTORANGER_H
+#endif // LSM6DSOXSampleData_H

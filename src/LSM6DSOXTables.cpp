@@ -261,9 +261,9 @@ std::map<uint8_t, String> LSM6DSOXTables::mapTagToStr = {
 
 // Find configuration bits for nearest value in table.
 uint8_t LSM6DSOXTables::nearestFloatToBits(float value, const vectorOfFloatsAndBits& v) {
-  auto upper_it = std::lower_bound(
+  auto upper_it = lower_bound(
     v.begin(), v.end()-1, value,
-    [](const std::pair<float, uint8_t>& p, float val) {return p.first < val;});
+    [](const pair<float, uint8_t>& p, float val) {return p.first < val;});
   auto lower_it = upper_it->first <= value ? upper_it : upper_it-1;
   uint8_t bits = abs(value - lower_it->first) <
                  abs(value - upper_it->first) ?
@@ -273,17 +273,17 @@ uint8_t LSM6DSOXTables::nearestFloatToBits(float value, const vectorOfFloatsAndB
 
 // Find lowest full range in table >= specified value
 uint8_t LSM6DSOXTables::largerOrEqualFloatToBits(float value, const vectorOfFloatsAndBits& v) {
-  auto value_it = std::lower_bound(
+  auto value_it = lower_bound(
     v.begin(), v.end()-1, value,
-    [](const std::pair<float, uint8_t>& p, float val) {return p.first < val;});
+    [](const pair<float, uint8_t>& p, float val) {return p.first < val;});
   return value_it->second;
 }
 
 // Find lowest full range in table <= specified value
 uint8_t LSM6DSOXTables::smallerOrEqualFloatToBits(float value, const vectorOfFloatsAndBits& v) {
-  auto value_it = std::lower_bound(
+  auto value_it = lower_bound(
     v.begin(), v.end(), value,
-    [](const std::pair<float, uint8_t>& p, float val) {return p.first < val;});
+    [](const pair<float, uint8_t>& p, float val) {return p.first < val;});
   if((value_it != v.begin()) && (value_it->first > value)) {
     value_it = value_it - 1;
   }
@@ -292,9 +292,9 @@ uint8_t LSM6DSOXTables::smallerOrEqualFloatToBits(float value, const vectorOfFlo
 
 // Look up range from configuration bits
 float LSM6DSOXTables::getFloatFromBits(uint8_t bits, const vectorOfFloatsAndBits& v) {
-  auto match = std::find_if(
+  auto match = find_if(
     v.begin(), v.end(),
-    [bits](const std::pair<float, uint8_t>& it){ return it.second == bits; });
+    [bits](const pair<float, uint8_t>& it){ return it.second == bits; });
   if(match != v.end()) {
     return match->first;
   }

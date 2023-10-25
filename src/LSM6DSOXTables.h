@@ -21,8 +21,11 @@
 #include <utility> // For pair
 #include <map>
 
-typedef std::vector<std::pair<float, uint8_t>> vectorOfFloatsAndBits;
-typedef std::vector<std::pair<uint16_t, std::vector<uint8_t>>> vectorOfIntsAndDownUpBits;
+using namespace std;
+
+
+typedef vector<pair<float, uint8_t>> vectorOfFloatsAndBits;
+typedef vector<pair<uint16_t, vector<uint8_t>>> vectorOfIntsAndDownUpBits;
 
 class LSM6DSOXTables {
   public:
@@ -49,7 +52,7 @@ class LSM6DSOXTables {
     // frequency is set to an arbitrary number slightly below ODR/2,
     // in order for this value to be selected when presented with
     // a cutoff of ODR/2. This will lead to G LPF1 being disabled. 
-    static const std::map<uint8_t, vectorOfFloatsAndBits> LPF1_G_bits;
+    static const map<uint8_t, vectorOfFloatsAndBits> LPF1_G_bits;
 
     // G HPF cutoff / configuration bits
     static const vectorOfFloatsAndBits HPF_G_bits;

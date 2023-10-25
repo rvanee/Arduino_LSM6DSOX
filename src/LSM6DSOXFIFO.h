@@ -22,8 +22,9 @@
 
 #include <Arduino.h>
 #include <limits>
+#include "LSM6DSOXSampleData.h"
 #include "TimestampEstimator.h"
-#include "AutoRanger.h"
+#include "LSM6DSOXAutoRanger.h"
 
 
 // I2C buffer size is limited to 32 bytes, see link below.
@@ -48,9 +49,6 @@
 #define FIFO_INT16_NAN        0xFFFF
 #define FIFO_FIXED_POINT_NAN  0xFFFFFFFF
 
-#define FIFO_AUTORANGE_ALPHA    3       // Trial and error
-#define FIFO_AUTORANGE_THR_UP   0x7FF0  // Trial and error, should be < 32767
-#define FIFO_AUTORANGE_THR_DOWN 0x7F00  // Trial and error, should be < THR_UP
 
 enum class ReadResult {
   NO_DATA_AVAILABLE,
@@ -81,9 +79,8 @@ public:
 
   // Autorange
   bool      autorange;                // Enables XL and G autorange feature
-  uint8_t   autorange_alpha;          // Used for extrapolation
-  uint16_t  autorange_threshold_up;   // Threshold going up
-  uint16_t  autorange_threshold_down; // Threshold going down
+  uint16_t  threshold_up;             // Threshold for 'gearing up'
+  uint16_t  threshold_down;           // Threshold for 'gearing down'
 
   // Watermarks
   uint16_t  watermark_level;          // 9 bits (0-511)
@@ -107,16 +104,9 @@ public:
   uint16_t DIFF_FIFO;   // Number of unread sensor data words (TAG + 6 bytes) stored in FIFO
 };
 
-struct SampleData {
-  int32_t XYZ[3];       // Fixed point data: decimal point between bits 15 and 16
-  int16_t rawXYZ[3];
-  uint16_t fullRange;
-  bool valid;
-};
-
 struct Sample {
-  SampleData G;
-  SampleData XL;
+  LSM6DSOXSampleData G;
+  LSM6DSOXSampleData XL;
   unsigned long long timestamp; // Timestamp in microseconds. May be 0 (= undefined)
   float temperature;            // May be NaN
   uint32_t counter;             // Lowest 2 bits provided by tag byte (TAG_CNT)
@@ -158,9 +148,8 @@ class LSM6DSOXFIFOClass {
 
       // Autorange
       bool      autorange = false,        // Enables XL and G autorange feature
-      uint8_t   autorange_alpha = FIFO_AUTORANGE_ALPHA,             // Used for extrapolation
-      uint16_t  autorange_threshold_up = FIFO_AUTORANGE_THR_UP,     // Threshold going up
-      uint16_t  autorange_threshold_down = FIFO_AUTORANGE_THR_DOWN, // Threshold going down
+      uint16_t  threshold_up = LSM6DSOXAutoRanger_THRESHOLD_UP,    // Threshold for 'gearing up'
+      uint16_t  threshold_down = LSM6DSOXAutoRanger_THRESHOLD_DOWN,// Threshold for 'gearing down'
 
       // Watermarks
       uint16_t  watermark_level = 0,      // 9 bits (0-511)
@@ -191,7 +180,7 @@ class LSM6DSOXFIFOClass {
 
     int32_t         raw2fixedrad(int16_t raw, uint16_t fullRange);
 
-    void            setSampleData(SampleData *s, 
+    void            setLSM6DSOXSampleData(LSM6DSOXSampleData *s, 
                                   int16_t X, int16_t Y, int16_t Z, uint16_t fullRange,
                                   bool valid, bool to_rad=false);
     void            initializeSample(uint8_t idx, bool setStatusInvalid = false);
@@ -218,8 +207,9 @@ class LSM6DSOXFIFOClass {
 
     bool            compression_enabled;
 
-    // AutoRanger
-    AutoRanger      autoRanger;
+    // LSM6DSOXAutoRangers
+    LSM6DSOXAutoRanger      LSM6DSOXAutoRanger_XL;
+    LSM6DSOXAutoRanger      LSM6DSOXAutoRanger_G;
 };
 
 #endif // LSM6DSOXFIFO_H

@@ -130,7 +130,9 @@ class LSM6DSOXClass {
     uint16_t fullRange_G;
 
   private:
+    int setRelativeFullRange_XL(uint16_t range, int8_t delta_range);
     int setFullRange_XL_bits(uint8_t fr_bits);
+    int setRelativeFullRange_G(uint16_t range, int8_t delta_range);
     int setFullRange_G_bits(uint8_t fr_bits);
     int readRegister(uint8_t address);
     int readRegisters(uint8_t address, uint8_t* data, size_t length);
@@ -149,6 +151,10 @@ class LSM6DSOXClass {
     SPISettings _spiSettings;
 
     uint16_t internalFrequencyFactor;
+
+    // Used to speed up XL/G full scale autorange
+    int16_t ctrl1_xl;
+    int16_t ctrl2_g;
 };
 
 extern LSM6DSOXClass IMU_LSM6DSOX;

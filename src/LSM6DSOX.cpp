@@ -100,6 +100,10 @@ LSM6DSOXClass::LSM6DSOXClass(TwoWire& wire, uint8_t slaveAddress) :
   // Full range not yet defined
   fullRange_XL = 0;
   fullRange_G = 0;
+
+  // Register contents not yet defined
+  ctrl1_xl = -1;
+  ctrl2_g = -1;
 }
 
 LSM6DSOXClass::LSM6DSOXClass(SPIClass& spi, int csPin, int irqPin) :
@@ -116,6 +120,10 @@ LSM6DSOXClass::LSM6DSOXClass(SPIClass& spi, int csPin, int irqPin) :
   // Full range not yet defined
   fullRange_XL = 0;
   fullRange_G = 0;
+
+  // Register contents not yet defined
+  ctrl1_xl = -1;
+  ctrl2_g = -1;
 }
 
 LSM6DSOXClass::~LSM6DSOXClass()
@@ -195,6 +203,16 @@ int LSM6DSOXClass::begin()
   // BDU
   uint8_t BDU_bit = settings.BDU ? MASK_BDU : 0x00;
   readModifyWriteRegister(LSM6DSOX_CTRL3_C, BDU_bit, MASK_BDU);
+
+  // Used to speed up XL/G full scale autorange
+  result = readRegister(LSM6DSOX_CTRL1_XL);
+  if(result >= 0) {
+    ctrl1_xl = result;
+  }
+  result = readRegister(LSM6DSOX_CTRL2_G);
+  if(result >= 0) {
+    ctrl2_g = result;
+  }
 
   // Find internal frequency correction factor
   result = readRegister(LSM6DSOX_INTERNAL_FREQ_FINE);
@@ -350,7 +368,14 @@ int LSM6DSOXClass::setRelativeFullRange_XL(uint16_t range, int8_t delta_range)
         uint8_t fr_bits = range_to_bits.second[delta_range + 4];
         // Only set new scale if the bit pattern differs from the current one
         if(fr_bits != range_to_bits.second[4]) {
-          return setFullRange_XL_bits(fr_bits);
+          int result = setFullRange_XL_bits(fr_bits);
+Serial.print("XL ");
+Serial.print(range);
+Serial.print(" -> ");
+Serial.println(fullRange_XL);
+          return result;
+        } else {
+          return 0; // Nothing set
         }
       }
     }
@@ -360,7 +385,12 @@ int LSM6DSOXClass::setRelativeFullRange_XL(uint16_t range, int8_t delta_range)
 
 int LSM6DSOXClass::setFullRange_XL_bits(uint8_t fr_bits) 
 {
-  int result = readModifyWriteRegister(LSM6DSOX_CTRL1_XL, fr_bits << 2, MASK_FR_XL);
+  int result;
+  if(ctrl1_xl >= 0) { // Speed up full scale selection by skipping read
+    result = writeRegister(LSM6DSOX_CTRL1_XL, (ctrl1_xl & ~MASK_FR_XL) | fr_bits << 2);
+  } else {
+    result = readModifyWriteRegister(LSM6DSOX_CTRL1_XL, fr_bits << 2, MASK_FR_XL);
+  }
   if(result > 0) {
     // Store selected full range
     fullRange_XL = (uint16_t)(LSM6DSOXTables::getFloatFromBits(fr_bits, LSM6DSOXTables::FR_XL_bits));
@@ -388,7 +418,15 @@ int LSM6DSOXClass::setRelativeFullRange_G(uint16_t range, int8_t delta_range)
         uint8_t fr_bits = range_to_bits.second[delta_range + 4];
         // Only set new scale if the bit pattern differs from the current one
         if(fr_bits != range_to_bits.second[4]) {
-          return setFullRange_G_bits(fr_bits);
+          int result = setFullRange_G_bits(fr_bits);
+Serial.print("G ");
+Serial.print(range);
+Serial.print(" -> ");
+Serial.println(fullRange_G);
+          if(result > )
+          return result;
+        } else {
+          return 0; // Nothing set
         }
       }
     }
@@ -398,7 +436,12 @@ int LSM6DSOXClass::setRelativeFullRange_G(uint16_t range, int8_t delta_range)
 
 int LSM6DSOXClass::setFullRange_G_bits(uint8_t fr_bits) 
 {
-  int result = readModifyWriteRegister(LSM6DSOX_CTRL2_G, fr_bits << 1, MASK_FR_G);
+  int result;
+  if(ctrl2_g >= 0) { // Speed up full scale selection by skipping read
+    result = writeRegister(LSM6DSOX_CTRL2_G, (ctrl2_g & ~MASK_FR_G) | fr_bits << 1);
+  } else {
+    result = readModifyWriteRegister(LSM6DSOX_CTRL2_G, fr_bits << 1, MASK_FR_G);
+  }
   if(result > 0) {
     // Store selected full range
     fullRange_G = (uint16_t)(LSM6DSOXTables::getFloatFromBits(fr_bits, LSM6DSOXTables::FR_G_bits));
