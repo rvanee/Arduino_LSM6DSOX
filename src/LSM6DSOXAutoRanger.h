@@ -20,11 +20,12 @@
 #ifndef LSM6DSOXAUTORANGER_H
 #define LSM6DSOXAUTORANGER_H
 
+#include <Arduino.h>
+#include "LSM6DSOXTables.h"
+#include "LSM6DSOXSampleData.h"
+
 #include <vector>
 #include <deque>
-using namespace std;
-
-#include <Arduino.h>
 
 
 /* These constants define autorange behaviour. They require some trial
@@ -47,14 +48,12 @@ using namespace std;
 #define LSM6DSOXAUTORANGER_THRESHOLD_UP   32000
 #define LSM6DSOXAUTORANGER_THRESHOLD_DOWN 15000
 
-// Forward declarations to break dependency cycle
-struct LSM6DSOXSampleData;
 
 struct LSM6DSOXAutoRangerSample {
     LSM6DSOXSampleData  sample;
     uint32_t            counter;
     uint16_t            optimal_full_range;
-}
+};
 
 class LSM6DSOXAutoRanger {
   public:
@@ -82,8 +81,11 @@ class LSM6DSOXAutoRanger {
     uint16_t  threshold_up;
     uint16_t  threshold_down;
 
+    // Filled by constructor: all full range options
+    std::vector<uint16_t> v_ranges;
+
     // Short history of samples
-    deque<LSM6DSOXAutoRangerSample> samples_deque;
+    std::deque<LSM6DSOXAutoRangerSample> samples_deque;
 
     // Last reported full range
     uint16_t  current_full_range;

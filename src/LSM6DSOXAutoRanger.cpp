@@ -19,20 +19,17 @@
 */
 
 #include "LSM6DSOXAutoRanger.h"
-#include "LSM6DSOXFIFO.h"
-#include "LSM6DSOXTables.h"
 
-//#include <bitset>
-//#include <algorithm>
+#include <algorithm> // std::sort
 
 
 LSM6DSOXAutoRanger::LSM6DSOXAutoRanger(const vectorOfFloatsAndBits& v) {
   // Copy full ranges from full range to bits transformation
   // table, and sort it in ascending order
-  for(int i = 0; i < v.size(); i++) {
-    v_ranges.push_back(static_cast<uint16_t>(v[i].first))
+  for(unsigned int i = 0; i < v.size(); i++) {
+    v_ranges.push_back(static_cast<uint16_t>(v[i].first));
   }
-  sort(v_ranges.begin(), v_ranges.end()); 
+  std::sort(v_ranges.begin(), v_ranges.end());
 
   reset();
 }
@@ -137,7 +134,7 @@ uint16_t LSM6DSOXAutoRanger::add_and_check_sample(uint32_t counter, LSM6DSOXSamp
 
   // Store new sample in deque
   samples_deque.push_back(
-    LSM6DSOXAutoRangerSample(sample, counter, full_range));
+    LSM6DSOXAutoRangerSample{sample, counter, full_range});
 
   // Check if full range should change. This should only happen
   // when the optimal full range found above is larger than the
@@ -240,9 +237,9 @@ inline uint32_t LSM6DSOXAutoRanger::max_abs_value(LSM6DSOXSampleData &sample)
 {
   // First cast to int32_t, since abs(-32768) can not be represented in
   // 16 bit 2's complement (signed) integer
-  uint32_t max_abs = max(abs(static_cast<int32_t>(sample.rawXYZ[0])), 
-                         abs(static_cast<int32_t>(sample.rawXYZ[1])));
-  return max(max_abs,    abs(static_cast<int32_t>(sample.rawXYZ[2])));
+  uint32_t max_abs = max(static_cast<uint32_t>(abs(static_cast<int32_t>(sample.rawXYZ[0]))), 
+                         static_cast<uint32_t>(abs(static_cast<int32_t>(sample.rawXYZ[1]))));
+  return max(max_abs,    static_cast<uint32_t>(abs(static_cast<int32_t>(sample.rawXYZ[2]))));
 }
 
 /*
