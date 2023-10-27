@@ -81,8 +81,7 @@ class LSM6DSOXAutoRanger {
     uint16_t  threshold_up;
     uint16_t  threshold_down;
 
-    // Filled by constructor: all full range options
-    std::vector<uint16_t> v_ranges;
+    const vectorOfFloatsAndBits* v_ranges;
 
     // Short history of samples
     std::deque<LSM6DSOXAutoRangerSample> samples_deque;

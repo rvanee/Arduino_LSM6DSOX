@@ -24,12 +24,7 @@
 
 
 LSM6DSOXAutoRanger::LSM6DSOXAutoRanger(const vectorOfFloatsAndBits& v) {
-  // Copy full ranges from full range to bits transformation
-  // table, and sort it in ascending order
-  for(unsigned int i = 0; i < v.size(); i++) {
-    v_ranges.push_back(static_cast<uint16_t>(v[i].first));
-  }
-  std::sort(v_ranges.begin(), v_ranges.end());
+  v_ranges = &v;
 
   reset();
 }
@@ -82,6 +77,12 @@ uint16_t LSM6DSOXAutoRanger::add_and_check_sample(uint32_t counter, LSM6DSOXSamp
 {
   uint16_t full_range = sample.fullRange;
 
+  // If current full range is uninitialized, use full range from
+  // the first sample provided to do that
+  if(current_full_range == 0) {
+    current_full_range = full_range;
+  }
+
   // Compare with last sample in deque
   if(samples_deque.size() > 0) {
     if(counter == samples_deque.back().counter) {
@@ -101,10 +102,10 @@ uint16_t LSM6DSOXAutoRanger::add_and_check_sample(uint32_t counter, LSM6DSOXSamp
   // Find full_range value that would bring the max_abs
   // value into range [threshold_down, threshold_up], if
   // possible
-  int s = v_ranges.size();
+  int s = (*v_ranges).size();
   // Linear search for matching full_range
   for(int idx = 0; idx < s; idx++) {
-    if(v_ranges[idx] == full_range) { // Found
+    if(static_cast<uint16_t>((*v_ranges)[idx].first) == full_range) { // Found
       int idx_scaled;
       // Find range for which max_abs < threshold_up
       // NOTE that this assumes that each step up in range
@@ -113,7 +114,7 @@ uint16_t LSM6DSOXAutoRanger::add_and_check_sample(uint32_t counter, LSM6DSOXSamp
           (max_abs >= threshold_up) && (idx_scaled < s); 
           idx_scaled++, max_abs >>= 1);
       if(idx_scaled > idx) {
-        full_range = v_ranges[idx_scaled];
+        full_range = static_cast<uint16_t>((*v_ranges)[idx_scaled].first);
         break;
       }
 
@@ -126,7 +127,7 @@ uint16_t LSM6DSOXAutoRanger::add_and_check_sample(uint32_t counter, LSM6DSOXSamp
           (max_abs < threshold_down) && (idx_scaled >= 0); 
           idx_scaled--, max_abs <<= 1);
       if(idx_scaled < idx) {
-        full_range = v_ranges[idx_scaled];
+        full_range = static_cast<uint16_t>((*v_ranges)[idx_scaled].first);
       }
       break;
     }
