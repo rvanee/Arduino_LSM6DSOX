@@ -21,10 +21,12 @@
 #define LSM6DSOXFIFO_H
 
 #include <Arduino.h>
-#include <limits>
+
 #include "LSM6DSOXSampleData.h"
 #include "TimestampEstimator.h"
 #include "LSM6DSOXAutoRanger.h"
+
+#include <limits>
 
 
 // I2C buffer size is limited to 32 bytes, see link below.
@@ -148,8 +150,8 @@ class LSM6DSOXFIFOClass {
 
       // Autorange
       bool      autorange = false,        // Enables XL and G autorange feature
-      uint16_t  threshold_up = LSM6DSOXAutoRanger_THRESHOLD_UP,    // Threshold for 'gearing up'
-      uint16_t  threshold_down = LSM6DSOXAutoRanger_THRESHOLD_DOWN,// Threshold for 'gearing down'
+      uint16_t  threshold_up = LSM6DSOXAUTORANGER_THRESHOLD_UP,    // Threshold for 'gearing up'
+      uint16_t  threshold_down = LSM6DSOXAUTORANGER_THRESHOLD_DOWN,// Threshold for 'gearing down'
 
       // Watermarks
       uint16_t  watermark_level = 0,      // 9 bits (0-511)
@@ -205,11 +207,12 @@ class LSM6DSOXFIFOClass {
     TimestampEstimator MCU_timestamp_estimator;
     bool            use_MCU_timestamp;
 
+    // Compression
     bool            compression_enabled;
 
-    // LSM6DSOXAutoRangers
-    LSM6DSOXAutoRanger      AutoRanger_XL;
-    LSM6DSOXAutoRanger      AutoRanger_G;
+    // AutoRangers (XL and G)
+    LSM6DSOXAutoRanger autoRanger_XL;
+    LSM6DSOXAutoRanger autoRanger_G;
 };
 
 #endif // LSM6DSOXFIFO_H

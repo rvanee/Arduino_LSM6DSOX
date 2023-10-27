@@ -17,11 +17,13 @@
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
+#include <Arduino.h>
+
 #include "LSM6DSOXFIFO.h"
 #include "LSM6DSOX.h"
 #include "LSM6DSOXTables.h"
+#include "LSM6DSOXAutoRanger.h"
 
-#include <Arduino.h>
 #include <math.h> // isnan
 
 
@@ -75,9 +77,11 @@
 #define Z_IDX                       2
 
 
-LSM6DSOXFIFOClass::LSM6DSOXFIFOClass(LSM6DSOXClass* imu) {
-  this->imu = imu;
-
+LSM6DSOXFIFOClass::LSM6DSOXFIFOClass(LSM6DSOXClass* imu) :
+  imu(imu),
+  autoRanger_XL(LSM6DSOXAutoRanger(LSM6DSOXTables::FR_XL_bits)),
+  autoRanger_G (LSM6DSOXAutoRanger(LSM6DSOXTables::FR_G_bits ))
+{
   compression_enabled = false;
   use_MCU_timestamp = false;
 
@@ -223,8 +227,8 @@ void LSM6DSOXFIFOClass::begin()
   }
 
   // Initialize AutoRangers
-  AutoRanger_XL.reset(settings.threshold_up, settings.threshold_down);
-  AutoRanger_G.reset(settings.threshold_up, settings.threshold_down);
+  autoRanger_XL.reset(settings.threshold_up, settings.threshold_down);
+  autoRanger_G.reset(settings.threshold_up, settings.threshold_down);
 }
 
 void LSM6DSOXFIFOClass::end()
@@ -374,7 +378,7 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
           // Check for need of emergency full range increase: overflow would lead 
           // to loss of most significant bit(s)
           uint16_t new_full_range_XL =
-            AutoRanger_XL.add_and_check_sample(autorange_counter, sample.XL);
+            autoRanger_XL.add_and_check_sample(autorange_counter, sample.XL);
           if(new_full_range_XL > 0) {
 Serial.print("XL ");
 Serial.print(imu->fullRange_XL);
@@ -384,7 +388,7 @@ Serial.println(new_full_range_XL);
           }
 
           uint16_t new_full_range_G =
-            AutoRanger_G.add_and_check_sample(autorange_counter, sample.G);
+            autoRanger_G.add_and_check_sample(autorange_counter, sample.G);
           if(new_full_range_G > 0) {
 Serial.print("G ");
 Serial.print(imu->fullRange_G);
@@ -401,7 +405,7 @@ Serial.println(new_full_range_G);
     // Now check if the XL and G full ranges may be scaled
     // down, in order to gain accuracy in the least significant
     // bits of the XL/G raw X/Y/Z values
-    uint16_t new_full_range_XL = AutoRanger_XL.check_underflow();
+    uint16_t new_full_range_XL = autoRanger_XL.check_underflow();
     if(new_full_range_XL > 0) {
 Serial.print("XL ");
 Serial.print(imu->fullRange_XL);
@@ -410,13 +414,13 @@ Serial.println(new_full_range_XL);
       imu->setFullRange_XL(new_full_range_XL);
     }
 
-    uint16_t new_full_range_XL = AutoRanger_G.check_underflow();
+    uint16_t new_full_range_G = autoRanger_G.check_underflow();
     if(new_full_range_G > 0) {
 Serial.print("G ");
 Serial.print(imu->fullRange_G);
 Serial.print(" -> ");
 Serial.println(new_full_range_G);
-      imu->setFullRange_XL(new_full_range_G);
+      imu->setFullRange_G(new_full_range_G);
     }
   }
 
@@ -589,23 +593,23 @@ DecodeTagResult LSM6DSOXFIFOClass::decodeWord(uint8_t *word)
 
     case 0x05: // CFG_Change Auxiliary Meta-information data
     {
-      // Gyro full range
-      uint8_t fs_g = word[FIFO_DATA_OUT_X_H] >> 5; // FS1_G FS0_G FS_125
-      uint16_t fr_G = LSM6DSOXTables::getFloatFromBits(fs_g, LSM6DSOXTables::FR_G_bits);
-      sample_buffer[current].G.fullRange = fr_G;
-      if(settings.autorange && (imu->fullRange_G != fr_G)) {
-        AutoRanger_G.notify_new_full_range(fr_G);
-      }
-      imu->fullRange_G = fr_G;
-
       // Accelerometer full range
       uint8_t fs_xl = word[FIFO_DATA_OUT_Y_L] >> 6; // FS1_XL FS0_XL
       uint16_t fr_XL = LSM6DSOXTables::getFloatFromBits(fs_xl, LSM6DSOXTables::FR_XL_bits);
       sample_buffer[current].XL.fullRange = fr_XL;
       if(settings.autorange && (imu->fullRange_XL != fr_XL)) {
-        AutoRanger_XL.notify_new_full_range(fr_XL);
+        autoRanger_XL.notify_new_full_range(sample_counter, fr_XL);
       }
       imu->fullRange_XL = fr_XL;
+
+      // Gyro full range
+      uint8_t fs_g = word[FIFO_DATA_OUT_X_H] >> 5; // FS1_G FS0_G FS_125
+      uint16_t fr_G = LSM6DSOXTables::getFloatFromBits(fs_g, LSM6DSOXTables::FR_G_bits);
+      sample_buffer[current].G.fullRange = fr_G;
+      if(settings.autorange && (imu->fullRange_G != fr_G)) {
+        autoRanger_G.notify_new_full_range(sample_counter, fr_G);
+      }
+      imu->fullRange_G = fr_G;
 
       // Compression
       compression_enabled = word[FIFO_DATA_OUT_Y_H] & 0x80;

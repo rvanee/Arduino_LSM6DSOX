@@ -17,6 +17,9 @@
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
+#ifndef LSM6DSOXTABLES_H
+#define LSM6DSOXTABLES_H
+
 #include <vector>
 #include <utility> // std::pair
 #include <map>
@@ -71,3 +74,5 @@ class LSM6DSOXTables {
     static uint8_t smallerOrEqualFloatToBits(float value, const vectorOfFloatsAndBits& v);
     static float getFloatFromBits(uint8_t bits, const vectorOfFloatsAndBits& v);
 };
+
+#endif // LSM6DSOXTABLES_H

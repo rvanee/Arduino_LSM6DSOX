@@ -23,7 +23,7 @@
 #define _USE_MATH_DEFINES
 #include <cmath>      // round
 #include <math.h>     // NAN and M_PI
-#include <algorithm>  // std::find
+
 
 #define LSM6DSOX_ADDRESS            0x6A
 
@@ -361,8 +361,11 @@ int LSM6DSOXClass::setFullRange_XL(float range)
 int LSM6DSOXClass::setFullRange_XL(uint16_t range) 
 {
   // Find matching full range and select corresponding configuration bits.
-  auto it = find(LSM6DSOXTables::FR_XL_bits.begin(), LSM6DSOXTables::FR_XL_bits.end(), range);
-  return setFullRange_XL_bits(it->second);
+  // Use simple linear search on this small table
+  for(auto it: LSM6DSOXTables::FR_XL_bits) {
+    if(it.first == range) return setFullRange_XL_bits(it.second);
+  }
+  return -1; // range not found
 }
 
 int LSM6DSOXClass::setFullRange_XL_bits(uint8_t fr_bits) 
@@ -383,8 +386,11 @@ int LSM6DSOXClass::setFullRange_XL_bits(uint8_t fr_bits)
 int LSM6DSOXClass::setFullRange_G(float range)
 {
   // Find matching full range and select corresponding configuration bits.
-  auto it = find(LSM6DSOXTables::FR_G_bits.begin(), LSM6DSOXTables::FR_G_bits.end(), range);
-  return setFullRange_G_bits(it->second);
+  // Use simple linear search on this small table
+  for(auto it: LSM6DSOXTables::FR_G_bits) {
+    if(it.first == range) return setFullRange_G_bits(it.second);
+  }
+  return -1; // range not found
 }
 
 int LSM6DSOXClass::setFullRange_G(uint16_t range)
