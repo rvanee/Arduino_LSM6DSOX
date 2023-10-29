@@ -205,16 +205,6 @@ int LSM6DSOXClass::begin()
   uint8_t BDU_bit = settings.BDU ? MASK_BDU : 0x00;
   readModifyWriteRegister(LSM6DSOX_CTRL3_C, BDU_bit, MASK_BDU);
 
-  // Used to speed up XL/G full scale autorange
-  result = readRegister(LSM6DSOX_CTRL1_XL);
-  if(result >= 0) {
-    ctrl1_xl = result;
-  }
-  result = readRegister(LSM6DSOX_CTRL2_G);
-  if(result >= 0) {
-    ctrl2_g = result;
-  }
-
   // Find internal frequency correction factor
   result = readRegister(LSM6DSOX_INTERNAL_FREQ_FINE);
   if(result >= 0) {
@@ -370,11 +360,19 @@ int LSM6DSOXClass::setFullRange_XL(uint16_t range)
 
 int LSM6DSOXClass::setFullRange_XL_bits(uint8_t fr_bits) 
 {
-  int result;
+  int result = 0;
   if(ctrl1_xl >= 0) { // Speed up full scale selection by skipping read
-    result = writeRegister(LSM6DSOX_CTRL1_XL, (ctrl1_xl & ~MASK_FR_XL) | fr_bits << 2);
-  } else {
-    result = readModifyWriteRegister(LSM6DSOX_CTRL1_XL, fr_bits << 2, MASK_FR_XL);
+    uint8_t new_ctrl1_xl = static_cast<uint8_t>(ctrl1_xl & ~MASK_FR_XL) | (fr_bits << 2);
+    if(new_ctrl1_xl != static_cast<uint8_t>(ctrl1_xl)) { // Only write if necessary
+      result = writeRegister(LSM6DSOX_CTRL1_XL, new_ctrl1_xl);
+      ctrl1_xl = new_ctrl1_xl;
+    }
+  } else { // ctrl1_xl not initialized
+    result = readRegister(LSM6DSOX_CTRL1_XL);
+    if(result >= 0) {
+      ctrl1_xl = (result & ~MASK_FR_XL) | (fr_bits << 2);
+      result = writeRegister(LSM6DSOX_CTRL1_XL, static_cast<uint8_t>(ctrl1_xl));
+    }
   }
   if(result > 0) {
     // Store selected full range
@@ -404,11 +402,18 @@ int LSM6DSOXClass::setFullRange_G(uint16_t range)
 
 int LSM6DSOXClass::setFullRange_G_bits(uint8_t fr_bits) 
 {
-  int result;
+  int result = 0;
   if(ctrl2_g >= 0) { // Speed up full scale selection by skipping read
-    result = writeRegister(LSM6DSOX_CTRL2_G, (ctrl2_g & ~MASK_FR_G) | fr_bits << 1);
-  } else {
-    result = readModifyWriteRegister(LSM6DSOX_CTRL2_G, fr_bits << 1, MASK_FR_G);
+    uint8_t new_ctrl2_g = static_cast<uint8_t>(ctrl2_g & ~MASK_FR_G) | (fr_bits << 1);
+    if(new_ctrl2_g != static_cast<uint8_t>(ctrl2_g)) { // Only write if necessary
+      result = writeRegister(LSM6DSOX_CTRL2_G, new_ctrl2_g);
+    }
+  } else { // ctrl2_g not initialized
+    result = readRegister(LSM6DSOX_CTRL2_G);
+    if(result >= 0) {
+      ctrl2_g = (result & ~MASK_FR_G) | (fr_bits << 1);
+      result = writeRegister(LSM6DSOX_CTRL2_G, static_cast<uint8_t>(ctrl2_g));
+    }
   }
   if(result > 0) {
     // Store selected full range

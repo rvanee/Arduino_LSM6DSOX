@@ -57,7 +57,6 @@ void LSM6DSOXAutoRanger::notify_set_full_range(uint32_t current_counter, uint16_
 
 void LSM6DSOXAutoRanger::notify_new_full_range(uint32_t current_counter, uint16_t new_full_range)
 {
-  // Always update our full range state
   current_full_range = new_full_range;
   
   // Notifications are not always related to a change in full range that
@@ -111,7 +110,7 @@ uint16_t LSM6DSOXAutoRanger::add_and_check_sample(uint32_t counter, LSM6DSOXSamp
       // NOTE that this assumes that each step up in range
       // doubles it by a factor of 2
       for(idx_scaled = idx; 
-          (max_abs >= threshold_up) && (idx_scaled < s); 
+          (max_abs >= threshold_up) && (idx_scaled < (s-1));
           idx_scaled++, max_abs >>= 1);
       if(idx_scaled > idx) {
         full_range = static_cast<uint16_t>((*v_ranges)[idx_scaled].first);
@@ -124,7 +123,7 @@ uint16_t LSM6DSOXAutoRanger::add_and_check_sample(uint32_t counter, LSM6DSOXSamp
       // NOTE that this assumes that each step up in range
       // doubles it by a factor of 2
       for(idx_scaled = idx; 
-          (max_abs < threshold_down) && (idx_scaled >= 0); 
+          (max_abs < threshold_down) && (idx_scaled > 0); 
           idx_scaled--, max_abs <<= 1);
       if(idx_scaled < idx) {
         full_range = static_cast<uint16_t>((*v_ranges)[idx_scaled].first);
@@ -183,56 +182,9 @@ uint16_t LSM6DSOXAutoRanger::check_underflow()
     samples_deque.pop_front();
   }
 
-  // Signal full scale range change (if )
+  // Signal full scale range change (0 means no change)
   return full_range;
 }
-
-
-/*
-uint16_t LSM6DSOXAutoRanger::predict_range(LSM6DSOXSampleData *prev_sample, LSM6DSOXSampleData *curr_sample)
-{
-  // Predict absolute values for X, Y and Z, and find max.
-  // Absolute value of current sample will always be <= 32768,
-  // prediction may be up to delta_counter * 32768.
-  uint32_t max_abs_prediction = abs_prediction(prev_sample->rawXYZ[0], 
-                                               curr_sample->rawXYZ[0]);
-  max_abs_prediction = std::max(max_abs_prediction, 
-                                abs_prediction(prev_sample->rawXYZ[1],
-                                               curr_sample->rawXYZ[1]));
-  max_abs_prediction = std::max(max_abs_prediction,
-                                abs_prediction(prev_sample->rawXYZ[2],
-                                               curr_sample->rawXYZ[2]));
-
-  // Scaling up should be performed as soon as possible if the absolute max
-  // determined above could overflow the measurement range
-  int8_t scale_up_down = 0;
-  uint32_t threshold = static_cast<uint32_t>(threshold_up);
-  for(; (scale_up_down <= 4) && (max_abs_prediction >= threshold); scale_up_down++) {
-    threshold <<= 1;
-  }
-  if(scale_up_down == 0) { 
-    // TODO
-    // Scaling down involves finding the max value of a number of consecutive
-    // samples, then scale that into the desired range [threshold_down, threshold_up].
-    // Restart history after scale change.
-    uint32_t threshold = static_cast<uint32_t>(threshold_down);
-    for(; (scale_up_down >= -4) && (max_abs_prediction <= threshold); scale_up_down--) {
-      threshold >>= 1;
-    } 
-    
-  }
-  return scale_up_down;
-
-          Serial.print("LSM6DSOXAutoRanger::predict_range pred=");
-          Serial.print(orred_abs_predictions);
-          Serial.print(" curr=");
-          Serial.print(orred_abs_current);
-          Serial.print(" combined=");
-          Serial.print(combined_bits, HEX);
-          Serial.print(" leading_one=");
-          Serial.print(leading_one);
-}
-*/
 
 inline uint32_t LSM6DSOXAutoRanger::max_abs_value(LSM6DSOXSampleData &sample)
 {
@@ -242,33 +194,3 @@ inline uint32_t LSM6DSOXAutoRanger::max_abs_value(LSM6DSOXSampleData &sample)
                          static_cast<uint32_t>(abs(static_cast<int32_t>(sample.rawXYZ[1]))));
   return max(max_abs,    static_cast<uint32_t>(abs(static_cast<int32_t>(sample.rawXYZ[2]))));
 }
-
-/*
-inline uint32_t LSM6DSOXAutoRanger::abs_prediction(int16_t prev_value, int16_t curr_value)
-{
-  int32_t curr_value_32 = static_cast<int32_t>(curr_value);
-  int32_t delta = curr_value_32 - static_cast<int32_t>(prev_value);
-  int32_t prediction = curr_value_32 + delta_counter * delta;
-
-  return static_cast<uint32_t>(abs(prediction));
-}
-*/
-
-/*
-uint16_t LSM6DSOXAutoRanger::adjusted_full_range(uint16_t full_range, int8_t range_factor)
-{
-  int s = v_ranges.size();
-  // Linear search for matching full_range
-  for(int idx = 0; idx < s; idx++) {
-    if(v_ranges[idx] == full_range) { // Found
-      // Check for underflow (idx+range_factor < 0)
-      if(idx <= (-range_factor))  return v_ranges[0];
-      // Check for overflow (idx+range_factor >= s)
-      if(idx >= (s-range_factor)) return v_ranges[s-1];
-      // Somewhere in range
-      return v_ranges[idx + range_factor];
-    }
-  }
-  return 0; // full_range not found in v_ranges (this should not happen!)
-}
-*/

@@ -370,7 +370,7 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
           return ReadResult::LOGIC_ERROR;
       }
 
-      if(settings.autorange) {
+      if(settings.autorange && (sample_counter > compression_offset)) {
         uint32_t finished_sample_counter = sample_counter - compression_offset - 1;
         for(; autorange_counter <= finished_sample_counter; autorange_counter++) {
           Sample &sample = sample_buffer[counterToIdx(autorange_counter)];
@@ -379,25 +379,13 @@ ReadResult LSM6DSOXFIFOClass::fillQueue()
           // to loss of most significant bit(s)
           uint16_t new_full_range_XL =
             autoRanger_XL.add_and_check_sample(autorange_counter, sample.XL);
-          if(new_full_range_XL > 0) {
-Serial.print("XL ");
-Serial.print(imu->fullRange_XL);
-Serial.print(" -> ");
-Serial.println(new_full_range_XL);
-            imu->setFullRange_XL(new_full_range_XL);
-          }
+          if(new_full_range_XL > 0) imu->setFullRange_XL(new_full_range_XL);
 
           uint16_t new_full_range_G =
             autoRanger_G.add_and_check_sample(autorange_counter, sample.G);
-          if(new_full_range_G > 0) {
-Serial.print("G ");
-Serial.print(imu->fullRange_G);
-Serial.print(" -> ");
-Serial.println(new_full_range_G);
-            imu->setFullRange_G(new_full_range_G);
-          }
-        }
-      } // END if(settings.autorange)
+          if(new_full_range_G > 0) imu->setFullRange_G(new_full_range_G);
+        } // END for
+      } // END if(settings.autorange && (sample_counter > compression_offset))
     } // END for(uint8_t *word = &read_buffer; ...
   } while(to_read > 0);
 
@@ -406,22 +394,10 @@ Serial.println(new_full_range_G);
     // down, in order to gain accuracy in the least significant
     // bits of the XL/G raw X/Y/Z values
     uint16_t new_full_range_XL = autoRanger_XL.check_underflow();
-    if(new_full_range_XL > 0) {
-Serial.print("XL ");
-Serial.print(imu->fullRange_XL);
-Serial.print(" -> ");
-Serial.println(new_full_range_XL);
-      imu->setFullRange_XL(new_full_range_XL);
-    }
+    if(new_full_range_XL > 0) imu->setFullRange_XL(new_full_range_XL);
 
     uint16_t new_full_range_G = autoRanger_G.check_underflow();
-    if(new_full_range_G > 0) {
-Serial.print("G ");
-Serial.print(imu->fullRange_G);
-Serial.print(" -> ");
-Serial.println(new_full_range_G);
-      imu->setFullRange_G(new_full_range_G);
-    }
+    if(new_full_range_G > 0) imu->setFullRange_G(new_full_range_G);
   }
 
   // IMU timestamp reconstruction enabled and possible?
